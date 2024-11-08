@@ -7,19 +7,22 @@ from typing import Dict
 from .utils import send_message, receive_message, find_free_port
 from .chunk import Chunk
 from .logger import GFSLogger
+import argparse
+import json
 
 class ChunkServer:
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, server_id: str = None):
         self.logger = GFSLogger.get_logger('chunk_server')
         self.logger.info(f"Initializing Chunk Server with config from {config_path}")
         
         self.config = toml.load(config_path)
         self.logger.debug(f"Loaded configuration: {self.config}")
         
-        self.port = find_free_port()
+        self.server_id = server_id or f"chunk_server_{int(time.time())}"
+        self.port = self._get_or_create_port()
         self.host = "localhost"
         self.address = f"{self.host}:{self.port}"
-        self.logger.info(f"Chunk server will run on {self.address}")
+        self.logger.info(f"Chunk server {self.server_id} will run on {self.address}")
         
         self.master_host = self.config['master']['host']
         self.master_port = self.config['master']['port']
@@ -27,24 +30,72 @@ class ChunkServer:
         
         self.data_dir = os.path.join(
             self.config['chunk_server']['data_dir'],
-            f"chunk_server_{self.port}"
+            self.server_id
         )
         os.makedirs(self.data_dir, exist_ok=True)
         self.logger.info(f"Created data directory at {self.data_dir}")
         
-        # Start server socket
+        self._save_server_info()
+        
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind((self.host, self.port))
         self.server_socket.listen(5)
         self.logger.info("Server socket initialized and listening")
         
-        # Start heartbeat thread
         self.heartbeat_thread = threading.Thread(target=self._send_heartbeat)
         self.heartbeat_thread.daemon = True
         self.logger.debug("Created heartbeat thread")
         
-        # Register with master
         self._register_with_master()
+
+    def _get_or_create_port(self) -> int:
+        """Get existing port for server ID or create new one."""
+        server_info_file = os.path.join(
+            self.config['chunk_server']['data_dir'],
+            'server_info.json'
+        )
+        
+        if os.path.exists(server_info_file):
+            with open(server_info_file, 'r') as f:
+                server_info = json.load(f)
+                if self.server_id in server_info:
+                    port = server_info[self.server_id]['port']
+                    self.logger.info(f"Found existing port {port} for server {self.server_id}")
+                    return port
+        
+        port = find_free_port()
+        self.logger.info(f"Assigned new port {port} for server {self.server_id}")
+        return port
+
+    def _save_server_info(self):
+        """Save server information to disk."""
+        server_info_file = os.path.join(
+            self.config['chunk_server']['data_dir'],
+            'server_info.json'
+        )
+        
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(server_info_file), exist_ok=True)
+        
+        # Load existing info or create new
+        if os.path.exists(server_info_file):
+            with open(server_info_file, 'r') as f:
+                server_info = json.load(f)
+        else:
+            server_info = {}
+        
+        # Update server info
+        server_info[self.server_id] = {
+            'port': self.port,
+            'data_dir': self.data_dir,
+            'last_start': time.time()
+        }
+        
+        # Save updated info
+        with open(server_info_file, 'w') as f:
+            json.dump(server_info, f, indent=2)
+        
+        self.logger.debug(f"Saved server info for {self.server_id}")
 
     def _register_with_master(self):
         """Register this chunk server with the master."""
@@ -198,5 +249,10 @@ class ChunkServer:
             self.server_socket.close()
 
 if __name__ == "__main__":
-    server = ChunkServer("configs/config.toml")
+    parser = argparse.ArgumentParser(description="Run a chunk server")
+    parser.add_argument("config_path", type=str, help="Path to the configuration file")
+    parser.add_argument("--server_id", type=str, help="Server ID")
+    args = parser.parse_args()
+    
+    server = ChunkServer(args.config_path, args.server_id)
     server.run() 
