@@ -1,0 +1,13 @@
+[master]
+host = "localhost"
+port = 5000
+chunk_size = 64000000  # 64MB chunks
+replication_factor = 3
+
+[chunk_server]
+base_port = 5001  # Chunk servers will start from this port
+data_dir = "data/chunks"
+heartbeat_interval = 5  # seconds
+
+[client]
+upload_chunk_size = 64000000  # Should match master's chunk_size
