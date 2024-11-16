@@ -3,7 +3,7 @@ import threading
 import time
 import os
 import toml
-from typing import Dict
+from typing import Dict, List
 from .utils import send_message, receive_message, find_free_port
 from .chunk import Chunk
 from .logger import GFSLogger
@@ -149,6 +149,8 @@ class ChunkServer:
                     self._handle_retrieve_chunk(client_socket, message)
                 elif command == 'delete_chunk':
                     self._handle_delete_chunk(client_socket, message)
+                elif command == 'replicate_chunk':
+                    self._handle_store_chunk(client_socket, message)
 
         except Exception as e:
             self.logger.error(f"Error handling client {address}: {e}", exc_info=True)
@@ -156,27 +158,88 @@ class ChunkServer:
             client_socket.close()
             self.logger.debug(f"Closed connection with {address}")
 
+    def _replicate_chunk(self, chunk_data: bytes, file_path: str, chunk_index: int, 
+                        replica_servers: List[str], current_replica: int = 0):
+        """Handle chunk replication to other servers in the chain."""
+        self.logger.info(f"Handling replication {current_replica + 1} of chunk for {file_path}")
+        
+        # Store the chunk locally first
+        chunk = Chunk(chunk_data, file_path, chunk_index)
+        chunk.save_to_disk(self.data_dir)
+        
+        # If there are more servers in the chain, forward to the next one
+        if current_replica < len(replica_servers) - 1:
+            next_server = replica_servers[current_replica + 1]
+            try:
+                with self._connect_to_chunk_server(next_server) as next_sock:
+                    self.logger.debug(f"Forwarding chunk to next server: {next_server}")
+                    send_message(next_sock, {
+                        'command': 'replicate_chunk',
+                        'data': chunk_data,
+                        'file_path': file_path,
+                        'chunk_index': chunk_index,
+                        'replica_servers': replica_servers,
+                        'current_replica': current_replica + 1
+                    })
+                    response = receive_message(next_sock)
+                    if response['status'] != 'ok':
+                        raise Exception(f"Replication failed at {next_server}")
+            except Exception as e:
+                self.logger.error(f"Failed to forward chunk to {next_server}: {e}")
+                raise
+        
+        return chunk.chunk_id
+
     def _handle_store_chunk(self, client_socket: socket.socket, message: Dict):
-        """Handle storing a chunk."""
+        """Handle storing a chunk and initiating replication if needed."""
         try:
             self.logger.info(f"Storing chunk for file {message['file_path']}")
-            chunk = Chunk(
-                message['data'],
-                message['file_path'],
-                message['chunk_index']
-            )
-            self.logger.debug(f"Created chunk with ID: {chunk.chunk_id}")
             
-            chunk.save_to_disk(self.data_dir)
-            self.logger.debug(f"Saved chunk to disk at {self.data_dir}")
+            if 'replica_servers' in message:
+                # This is part of a replication chain
+                chunk_id = self._replicate_chunk(
+                    message['data'],
+                    message['file_path'],
+                    message['chunk_index'],
+                    message['replica_servers'],
+                    message['current_replica']
+                )
+            else:
+                # This is the initial store from client
+                # Get replication targets from master
+                with self._connect_to_master() as master_sock:
+                    send_message(master_sock, {
+                        'command': 'get_replica_locations',
+                        'excluding': self.address
+                    })
+                    response = receive_message(master_sock)
+                    replica_servers = [self.address] + response['locations']
+                
+                chunk_id = self._replicate_chunk(
+                    message['data'],
+                    message['file_path'],
+                    message['chunk_index'],
+                    replica_servers,
+                    0
+                )
+                
+                # Update master with final chunk locations
+                with self._connect_to_master() as master_sock:
+                    send_message(master_sock, {
+                        'command': 'update_chunk_locations',
+                        'file_path': message['file_path'],
+                        'chunk_id': chunk_id,
+                        'locations': replica_servers
+                    })
             
             send_message(client_socket, {
                 'status': 'ok',
-                'chunk_id': chunk.chunk_id
+                'chunk_id': chunk_id
             })
-            self.logger.info(f"Successfully stored chunk {chunk.chunk_id}")
+            self.logger.info(f"Successfully handled chunk {chunk_id}")
+            
         except Exception as e:
-            self.logger.error(f"Failed to store chunk: {e}", exc_info=True)
+            self.logger.error(f"Failed to store/replicate chunk: {e}", exc_info=True)
             send_message(client_socket, {
                 'status': 'error',
                 'message': str(e)
@@ -247,6 +310,23 @@ class ChunkServer:
         except Exception as e:
             self.logger.error(f"Unexpected error in chunk server: {e}", exc_info=True)
             self.server_socket.close()
+
+    def _connect_to_master(self) -> socket.socket:
+        """Connect to the master server."""
+        self.logger.debug(f"Connecting to master at {self.master_host}:{self.master_port}")
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((self.master_host, self.master_port))
+        self.logger.debug("Connected to master server")
+        return s
+
+    def _connect_to_chunk_server(self, address: str) -> socket.socket:
+        """Connect to another chunk server."""
+        host, port = address.split(':')
+        self.logger.debug(f"Connecting to chunk server at {address}")
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((host, int(port)))
+        self.logger.debug(f"Connected to chunk server at {address}")
+        return s
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run a chunk server")

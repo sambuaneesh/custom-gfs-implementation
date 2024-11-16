@@ -89,49 +89,30 @@ class GFSClient:
             if response.get('status') != 'ok':
                 raise Exception(f"Failed to add file metadata: {response.get('message')}")
 
-        # Store chunks on chunk servers
-        replication_factor = min(self.config['master']['replication_factor'], len(available_servers))
-        
+        # Store chunks on primary chunk servers
         for chunk in chunks:
             self.logger.debug(f"Processing chunk {chunk.chunk_id} (index: {chunk.chunk_index})")
             
-            # Select random servers for this chunk
-            selected_servers = random.sample(available_servers, replication_factor)
-            self.logger.debug(f"Selected servers for chunk: {selected_servers}")
+            # Select primary server for this chunk
+            primary_server = random.choice(available_servers)
+            self.logger.debug(f"Selected primary server for chunk: {primary_server}")
             
-            # Store chunk on selected servers
-            chunk_locations = []
-            for server_address in selected_servers:
-                try:
-                    self.logger.debug(f"Attempting to store chunk on {server_address}")
-                    with self._connect_to_chunk_server(server_address) as chunk_sock:
-                        send_message(chunk_sock, {
-                            'command': 'store_chunk',
-                            'data': chunk.data,
-                            'file_path': chunk.file_path,
-                            'chunk_index': chunk.chunk_index
-                        })
-                        response = receive_message(chunk_sock)
-                        if response['status'] == 'ok':
-                            chunk_locations.append(server_address)
-                            self.logger.debug(f"Successfully stored chunk on {server_address}")
-                except Exception as e:
-                    self.logger.error(f"Failed to store chunk on {server_address}: {e}")
-
-            if not chunk_locations:
-                error_msg = f"Failed to store chunk {chunk.chunk_id} on any server"
-                self.logger.error(error_msg)
-                raise Exception(error_msg)
-
-            # Update master with chunk locations
-            with self._connect_to_master() as master_sock:
-                self.logger.debug(f"Updating master with chunk locations: {chunk_locations}")
-                send_message(master_sock, {
-                    'command': 'update_chunk_locations',
-                    'file_path': gfs_path,
-                    'chunk_id': chunk.chunk_id,
-                    'locations': chunk_locations
-                })
+            try:
+                # Send chunk to primary server, which will handle replication
+                with self._connect_to_chunk_server(primary_server) as chunk_sock:
+                    send_message(chunk_sock, {
+                        'command': 'store_chunk',
+                        'data': chunk.data,
+                        'file_path': chunk.file_path,
+                        'chunk_index': chunk.chunk_index
+                    })
+                    response = receive_message(chunk_sock)
+                    if response['status'] != 'ok':
+                        raise Exception(f"Failed to store chunk: {response.get('message')}")
+                    
+            except Exception as e:
+                self.logger.error(f"Failed to store chunk on {primary_server}: {e}")
+                raise Exception(f"Failed to store chunk {chunk.chunk_id}: {str(e)}")
         
         self.logger.info(f"Successfully uploaded {local_path} to GFS path {gfs_path}")
 

@@ -2,10 +2,11 @@ import socket
 import threading
 import time
 import toml
-from typing import Dict, Set, List
+from typing import Dict
 from .file_manager import FileManager
 from .utils import send_message, receive_message
 from .logger import GFSLogger
+import random
 
 class MasterServer:
     def __init__(self, config_path: str):
@@ -81,6 +82,8 @@ class MasterServer:
                     self._handle_get_chunk_servers(client_socket)
                 elif command == 'add_file':
                     self._handle_add_file(client_socket, message)
+                elif command == 'get_replica_locations':
+                    self._handle_get_replica_locations(client_socket, message)
 
         except Exception as e:
             self.logger.error(f"Error handling client {address}: {e}", exc_info=True)
@@ -170,6 +173,27 @@ class MasterServer:
             send_message(client_socket, {
                 'status': 'error',
                 'message': str(e)
+            })
+
+    def _handle_get_replica_locations(self, client_socket: socket.socket, message: Dict):
+        """Handle request for replica locations."""
+        with self.chunk_server_lock:
+            available_servers = list(self.chunk_servers.keys())
+            # Remove the requesting server from available servers
+            if message['excluding'] in available_servers:
+                available_servers.remove(message['excluding'])
+            
+            # Select servers for replication
+            num_replicas = min(
+                self.config['master']['replication_factor'] - 1,  # -1 because one copy is already on primary
+                len(available_servers)
+            )
+            selected_servers = random.sample(available_servers, num_replicas)
+            
+            self.logger.debug(f"Selected replica servers: {selected_servers}")
+            send_message(client_socket, {
+                'status': 'ok',
+                'locations': selected_servers
             })
 
     def run(self):
