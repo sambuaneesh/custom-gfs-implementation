@@ -68,6 +68,7 @@ base_port = 5001
 data_dir = "data/chunks"
 heartbeat_interval = 5  # seconds
 server_info_file = "data/chunks/server_info.json"
+space_limit_mb = 1024  # Space limit per chunk server in MB
 
 [client]
 upload_chunk_size = 64000000
@@ -186,6 +187,59 @@ The web interface provides:
 - Detailed transaction logs
 - Component-specific log files
 - Server health monitoring through heartbeats
+
+### Background Replication System
+
+The system implements a robust background replication mechanism that ensures data reliability even when there aren't enough chunk servers available initially:
+
+#### Features
+- **Dynamic Replication Queue**: Tracks chunks that haven't met their replication factor
+- **Space-Aware Replication**: Respects chunk server space limits during replication
+- **Automatic Recovery**: Automatically replicates data when new servers become available
+- **Persistent Tracking**: Maintains pending replication status across system restarts
+
+#### How it Works
+
+1. **Initial Storage**
+   - When a chunk is stored, the system attempts immediate replication
+   - If insufficient servers are available, the chunk is added to a replication queue
+
+2. **Background Processing**
+   - A dedicated background thread monitors the replication queue
+   - Periodically checks for new available servers
+   - Attempts to meet replication factor when resources become available
+
+3. **New Server Integration**
+   - When new chunk servers join:
+     - They register with the master server
+     - The background replication system detects them
+     - Pending replications are automatically attempted
+     - Replication status is updated upon success
+
+4. **Space Management**
+   - Checks available space before replication attempts
+   - Skips servers with insufficient space
+   - Maintains space limits specified during chunk server initialization
+
+#### Configuration
+
+The replication system uses these settings in `config.toml`:
+
+```toml
+[master]
+replication_factor = 3  # Desired number of replicas per chunk
+
+[chunk_server]
+space_limit_mb = 1024  # Space limit per chunk server in MB
+```
+
+#### Monitoring
+
+The replication status can be monitored through:
+- Log files showing replication attempts and status
+- Transaction logs tracking replication progress
+- Metadata showing current replica count per chunk
+- Replication queue status in master server logs
 
 ## Monitoring
 

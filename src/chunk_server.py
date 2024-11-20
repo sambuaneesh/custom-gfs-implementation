@@ -314,7 +314,7 @@ class ChunkServer:
                     os.replace(temp_path, final_path)
                     successful_servers = [self.address] + successful_replicas
 
-                    # Update master with actual locations
+                    # Update master with actual locations and pending replication status
                     with self._connect_to_master() as master_sock:
                         send_message(master_sock, {
                             'command': 'update_file_metadata',
@@ -322,7 +322,7 @@ class ChunkServer:
                             'chunk_id': chunk_id,
                             'chunk_locations': successful_servers,
                             'chunk_size': chunk_size,
-                            'pending_replication': len(successful_servers) < self.config['master']['replication_factor']
+                            'pending_replication': True  # Indicate that replication might be needed
                         })
 
                     GFSLogger.log_transaction(

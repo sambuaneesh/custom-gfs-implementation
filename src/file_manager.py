@@ -14,6 +14,11 @@ class FileMetadata:
     chunk_offsets: Dict[str, int]  # chunk_id -> offset within chunk
     last_chunk_id: str  # ID of the last chunk for appends
     last_chunk_offset: int  # Current offset in the last chunk
+    pending_replication: Dict[str, int] = None  # chunk_id -> required additional replicas
+
+    def __post_init__(self):
+        if self.pending_replication is None:
+            self.pending_replication = {}
 
 class FileManager:
     def __init__(self, metadata_dir: str, config: Dict):

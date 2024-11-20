@@ -2,7 +2,7 @@ import socket
 import threading
 import time
 import toml
-from typing import Dict
+from typing import Dict, List, Set
 from .file_manager import FileManager
 from .utils import send_message, receive_message
 from .logger import GFSLogger
@@ -35,6 +35,16 @@ class MasterServer:
         self.heartbeat_thread.daemon = True
         self.heartbeat_thread.start()
         self.logger.info("Heartbeat checker thread started")
+        
+        # Add replication queue and its lock
+        self.replication_queue = set()  # Set of (file_path, chunk_id) tuples
+        self.replication_queue_lock = threading.Lock()
+        
+        # Start background replication thread
+        self.replication_thread = threading.Thread(target=self._handle_pending_replications)
+        self.replication_thread.daemon = True
+        self.replication_thread.start()
+        self.logger.info("Started background replication thread")
 
     def _check_heartbeats(self):
         """Check for chunk server heartbeats and remove dead servers."""
@@ -257,6 +267,118 @@ class MasterServer:
                 'message': str(e)
             })
 
+    def _handle_pending_replications(self):
+        """Background thread to handle pending replications."""
+        while True:
+            try:
+                with self.replication_queue_lock:
+                    pending_replications = list(self.replication_queue)
+                
+                for file_path, chunk_id in pending_replications:
+                    try:
+                        metadata = self.file_manager.get_file_metadata(file_path)
+                        if not metadata or chunk_id not in metadata.pending_replication:
+                            self.replication_queue.discard((file_path, chunk_id))
+                            continue
+                            
+                        current_replicas = len(metadata.chunk_locations.get(chunk_id, []))
+                        needed_replicas = metadata.pending_replication[chunk_id]
+                        
+                        if current_replicas >= self.config['master']['replication_factor']:
+                            # Replication factor met
+                            metadata.pending_replication.pop(chunk_id, None)
+                            self.replication_queue.discard((file_path, chunk_id))
+                            continue
+                            
+                        # Get current locations
+                        current_locations = set(metadata.chunk_locations.get(chunk_id, []))
+                        
+                        # Get available chunk servers
+                        with self.chunk_server_lock:
+                            available_servers = set(self.chunk_servers.keys()) - current_locations
+                            
+                        if not available_servers:
+                            continue  # No new servers available
+                            
+                        # Try to replicate to new servers
+                        self._replicate_to_new_servers(
+                            file_path,
+                            chunk_id,
+                            current_locations,
+                            available_servers,
+                            needed_replicas
+                        )
+                            
+                    except Exception as e:
+                        self.logger.error(f"Error handling replication for {file_path}, chunk {chunk_id}: {e}")
+                        
+            except Exception as e:
+                self.logger.error(f"Error in replication thread: {e}")
+                
+            time.sleep(10)  # Wait before next replication attempt
+
+    def _replicate_to_new_servers(self, file_path: str, chunk_id: str, 
+                                current_locations: Set[str], 
+                                available_servers: Set[str],
+                                needed_replicas: int):
+        """Attempt to replicate a chunk to new servers."""
+        # Select a source server
+        if not current_locations:
+            self.logger.error(f"No source locations for chunk {chunk_id}")
+            return
+            
+        source_server = random.choice(list(current_locations))
+        
+        # Select target servers
+        target_servers = random.sample(
+            list(available_servers),
+            min(needed_replicas, len(available_servers))
+        )
+        
+        for target_server in target_servers:
+            try:
+                # Connect to source server
+                host, port = source_server.split(':')
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as source_sock:
+                    source_sock.connect((host, int(port)))
+                    
+                    # Request chunk data
+                    send_message(source_sock, {
+                        'command': 'retrieve_chunk',
+                        'chunk_id': chunk_id
+                    })
+                    
+                    response = receive_message(source_sock)
+                    if response['status'] != 'ok':
+                        continue
+                        
+                    chunk_data = response['data']
+                    
+                    # Send to target server
+                    host, port = target_server.split(':')
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as target_sock:
+                        target_sock.connect((host, int(port)))
+                        
+                        send_message(target_sock, {
+                            'command': 'store_chunk',
+                            'chunk_id': chunk_id,
+                            'file_path': file_path,
+                            'data': chunk_data,
+                            'replica_servers': True
+                        })
+                        
+                        response = receive_message(target_sock)
+                        if response['status'] == 'ok':
+                            # Update locations
+                            self.file_manager.update_chunk_locations(
+                                file_path,
+                                chunk_id,
+                                list(current_locations | {target_server})
+                            )
+                            
+            except Exception as e:
+                self.logger.error(f"Failed to replicate to {target_server}: {e}")
+
     def _handle_update_file_metadata(self, client_socket: socket.socket, message: Dict):
         """Handle updating file metadata after successful chunk storage."""
         try:
@@ -264,6 +386,7 @@ class MasterServer:
             chunk_id = message['chunk_id']
             chunk_locations = message['chunk_locations']
             chunk_size = message.get('chunk_size', 0)
+            pending_replication = message.get('pending_replication', False)
 
             self.logger.debug(f"Updating metadata for file {file_path}, chunk {chunk_id}")
 
@@ -277,6 +400,14 @@ class MasterServer:
                 metadata.total_size += chunk_size
                 metadata.last_chunk_id = chunk_id
                 metadata.last_chunk_offset = chunk_size
+                
+                # Handle pending replication
+                if pending_replication:
+                    needed_replicas = self.config['master']['replication_factor'] - len(chunk_locations)
+                    if needed_replicas > 0:
+                        metadata.pending_replication[chunk_id] = needed_replicas
+                        with self.replication_queue_lock:
+                            self.replication_queue.add((file_path, chunk_id))
             else:
                 # Create new file metadata
                 self.file_manager.add_file(
@@ -286,6 +417,15 @@ class MasterServer:
                 )
                 # Update chunk locations
                 self.file_manager.update_chunk_locations(file_path, chunk_id, chunk_locations)
+                
+                # Handle pending replication for new file
+                if pending_replication:
+                    needed_replicas = self.config['master']['replication_factor'] - len(chunk_locations)
+                    if needed_replicas > 0:
+                        metadata = self.file_manager.get_file_metadata(file_path)
+                        metadata.pending_replication[chunk_id] = needed_replicas
+                        with self.replication_queue_lock:
+                            self.replication_queue.add((file_path, chunk_id))
 
             self.logger.info(f"Successfully updated metadata for {file_path}")
             send_message(client_socket, {'status': 'ok'})
