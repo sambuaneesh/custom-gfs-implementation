@@ -1,6 +1,6 @@
 import socket
 import os
-from typing import List, Dict
+from typing import List, Dict, Optional
 import toml
 from .utils import send_message, receive_message
 from .chunk import Chunk
@@ -50,6 +50,36 @@ class GFSClient:
                 raise Exception("No chunk servers available")
             return servers
 
+    def _store_chunk_with_fallback(self, chunk: Chunk, available_servers: List[str]) -> Optional[str]:
+        """Try to store chunk on available servers, handling space constraints."""
+        for server in available_servers:
+            try:
+                with self._connect_to_chunk_server(server) as chunk_sock:
+                    send_message(chunk_sock, {
+                        'command': 'store_chunk',
+                        'data': chunk.data,
+                        'file_path': chunk.file_path,
+                        'chunk_index': chunk.chunk_index,
+                        'chunk_id': chunk.chunk_id
+                    })
+                    response = receive_message(chunk_sock)
+                    
+                    if response['status'] == 'ok':
+                        self.logger.info(f"Stored chunk with {response.get('replicas', 0)} replicas")
+                        return server
+                    elif response.get('message') == 'insufficient_space':
+                        self.logger.warning(f"Server {server} has insufficient space, trying next server")
+                        continue
+                    else:
+                        self.logger.error(f"Failed to store chunk: {response.get('message')}")
+                        continue
+                    
+            except Exception as e:
+                self.logger.error(f"Failed to store chunk on {server}: {e}")
+                continue
+                
+        return None
+
     def upload_file(self, local_path: str, gfs_path: str):
         """Upload a file to GFS."""
         self.logger.info(f"Starting upload of {local_path} to GFS path {gfs_path}")
@@ -80,28 +110,19 @@ class GFSClient:
 
         # Store chunks through primary servers
         for chunk in chunks:
-            # Select primary server
-            primary_server = random.choice(available_servers)
-            self.logger.debug(f"Selected primary server {primary_server} for chunk {chunk.chunk_id}")
+            # Get all available servers
+            available_servers = self._get_available_chunk_servers()
+            if not available_servers:
+                raise Exception("No chunk servers available")
+
+            # Try to store chunk on any available server
+            success_server = self._store_chunk_with_fallback(chunk, available_servers)
             
-            try:
-                with self._connect_to_chunk_server(primary_server) as chunk_sock:
-                    send_message(chunk_sock, {
-                        'command': 'store_chunk',
-                        'data': chunk.data,
-                        'file_path': chunk.file_path,
-                        'chunk_index': chunk.chunk_index,
-                        'chunk_id': chunk.chunk_id
-                    })
-                    response = receive_message(chunk_sock)
-                    if response['status'] != 'ok':
-                        raise Exception(f"Failed to store chunk: {response.get('message')}")
-                    
-            except Exception as e:
-                self.logger.error(f"Failed to store chunk on {primary_server}: {e}")
-                raise Exception(f"Failed to store chunk {chunk.chunk_id}: {str(e)}")
-        
-        self.logger.info(f"Successfully uploaded {local_path} to GFS path {gfs_path}")
+            if not success_server:
+                self.logger.error(f"Failed to store chunk {chunk.chunk_id} on any server")
+                raise Exception(f"No servers available with sufficient space for chunk {chunk.chunk_id}")
+
+            self.logger.info(f"Successfully stored chunk {chunk.chunk_id} on server {success_server}")
 
     def download_file(self, gfs_path: str, local_path: str):
         """Download a file from GFS."""
