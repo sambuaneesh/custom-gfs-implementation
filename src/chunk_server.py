@@ -352,6 +352,19 @@ class ChunkServer:
                             )
 
                     if len(committed_servers) == len(prepared_servers):
+                        # After successful commit, update master with chunk locations
+                        with self._connect_to_master() as master_sock:
+                            send_message(master_sock, {
+                                'command': 'update_file_metadata',
+                                'file_path': file_path,
+                                'chunk_id': chunk_id,
+                                'chunk_locations': committed_servers,
+                                'chunk_size': len(data)
+                            })
+                            metadata_response = receive_message(master_sock)
+                            if metadata_response['status'] != 'ok':
+                                self.logger.error(f"Failed to update master metadata: {metadata_response.get('message')}")
+
                         GFSLogger.log_transaction(
                             self.transaction_logger,
                             transaction_id,

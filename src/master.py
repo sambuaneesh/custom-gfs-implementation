@@ -88,6 +88,8 @@ class MasterServer:
                     self._handle_update_chunk_offset(client_socket, message)
                 elif command == 'add_chunk':
                     self._handle_add_chunk(client_socket, message)
+                elif command == 'update_file_metadata':
+                    self._handle_update_file_metadata(client_socket, message)
 
         except Exception as e:
             self.logger.error(f"Error handling client {address}: {e}", exc_info=True)
@@ -250,6 +252,46 @@ class MasterServer:
             
         except Exception as e:
             self.logger.error(f"Failed to add chunk: {e}")
+            send_message(client_socket, {
+                'status': 'error',
+                'message': str(e)
+            })
+
+    def _handle_update_file_metadata(self, client_socket: socket.socket, message: Dict):
+        """Handle updating file metadata after successful chunk storage."""
+        try:
+            file_path = message['file_path']
+            chunk_id = message['chunk_id']
+            chunk_locations = message['chunk_locations']
+            chunk_size = message.get('chunk_size', 0)
+
+            self.logger.debug(f"Updating metadata for file {file_path}, chunk {chunk_id}")
+
+            # Get existing metadata or create new
+            metadata = self.file_manager.get_file_metadata(file_path)
+            if metadata:
+                # Update existing file metadata
+                if chunk_id not in metadata.chunk_ids:
+                    metadata.chunk_ids.append(chunk_id)
+                metadata.chunk_locations[chunk_id] = chunk_locations
+                metadata.total_size += chunk_size
+                metadata.last_chunk_id = chunk_id
+                metadata.last_chunk_offset = chunk_size
+            else:
+                # Create new file metadata
+                self.file_manager.add_file(
+                    file_path=file_path,
+                    total_size=chunk_size,
+                    chunk_ids=[chunk_id]
+                )
+                # Update chunk locations
+                self.file_manager.update_chunk_locations(file_path, chunk_id, chunk_locations)
+
+            self.logger.info(f"Successfully updated metadata for {file_path}")
+            send_message(client_socket, {'status': 'ok'})
+
+        except Exception as e:
+            self.logger.error(f"Failed to update file metadata: {e}")
             send_message(client_socket, {
                 'status': 'error',
                 'message': str(e)

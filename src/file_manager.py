@@ -68,10 +68,25 @@ class FileManager:
                 chunk_locations={},
                 chunk_offsets={chunk_id: 0 for chunk_id in chunk_ids},
                 last_chunk_id=chunk_ids[-1] if chunk_ids else None,
-                last_chunk_offset=total_size % self.config['master']['chunk_size']  # Initialize with correct offset
+                last_chunk_offset=total_size % self.config['master']['chunk_size']
             )
             self._save_metadata()
-        self.logger.info(f"Successfully added file {file_path}")
+            self.logger.info(f"Successfully added file {file_path}")
+
+    def update_file_metadata(self, file_path: str, chunk_id: str, locations: List[str], size: int):
+        """Update file metadata with new chunk information."""
+        with self.metadata_lock:
+            if file_path not in self.files:
+                self.add_file(file_path, size, [chunk_id])
+            else:
+                metadata = self.files[file_path]
+                if chunk_id not in metadata.chunk_ids:
+                    metadata.chunk_ids.append(chunk_id)
+                metadata.chunk_locations[chunk_id] = locations
+                metadata.total_size += size
+                metadata.last_chunk_id = chunk_id
+                metadata.last_chunk_offset = size
+            self._save_metadata()
 
     def update_chunk_locations(self, file_path: str, chunk_id: str, locations: List[str]):
         """Update the locations of a chunk."""
