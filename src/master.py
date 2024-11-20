@@ -84,6 +84,8 @@ class MasterServer:
                     self._handle_add_file(client_socket, message)
                 elif command == 'get_replica_locations':
                     self._handle_get_replica_locations(client_socket, message)
+                elif command == 'update_chunk_offset':
+                    self._handle_update_chunk_offset(client_socket, message)
 
         except Exception as e:
             self.logger.error(f"Error handling client {address}: {e}", exc_info=True)
@@ -194,6 +196,22 @@ class MasterServer:
             send_message(client_socket, {
                 'status': 'ok',
                 'locations': selected_servers
+            })
+
+    def _handle_update_chunk_offset(self, client_socket: socket.socket, message: Dict):
+        """Handle updating chunk offset."""
+        try:
+            self.file_manager.update_chunk_offset(
+                message['file_path'],
+                message['chunk_id'],
+                message['offset']
+            )
+            send_message(client_socket, {'status': 'ok'})
+        except Exception as e:
+            self.logger.error(f"Failed to update chunk offset: {e}")
+            send_message(client_socket, {
+                'status': 'error',
+                'message': str(e)
             })
 
     def run(self):

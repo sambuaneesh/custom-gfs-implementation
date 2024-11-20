@@ -11,6 +11,9 @@ class FileMetadata:
     total_size: int
     chunk_ids: List[str]
     chunk_locations: Dict[str, List[str]]  # chunk_id -> list of chunk server addresses
+    chunk_offsets: Dict[str, int]  # chunk_id -> offset within chunk
+    last_chunk_id: str  # ID of the last chunk for appends
+    last_chunk_offset: int  # Current offset in the last chunk
 
 class FileManager:
     def __init__(self, metadata_dir: str):
@@ -54,14 +57,16 @@ class FileManager:
     def add_file(self, file_path: str, total_size: int, chunk_ids: List[str]):
         """Add a new file to the metadata."""
         self.logger.info(f"Adding new file: {file_path}")
-        self.logger.debug(f"File size: {total_size} bytes, Chunks: {chunk_ids}")
         
         with self.metadata_lock:
             self.files[file_path] = FileMetadata(
                 file_path=file_path,
                 total_size=total_size,
                 chunk_ids=chunk_ids,
-                chunk_locations={}
+                chunk_locations={},
+                chunk_offsets={chunk_id: 0 for chunk_id in chunk_ids},
+                last_chunk_id=chunk_ids[-1] if chunk_ids else None,
+                last_chunk_offset=0
             )
             self._save_metadata()
         self.logger.info(f"Successfully added file {file_path}")
@@ -108,3 +113,12 @@ class FileManager:
             else:
                 self.logger.warning(f"No metadata found for file: {file_path}")
             return metadata
+
+    def update_chunk_offset(self, file_path: str, chunk_id: str, offset: int):
+        """Update the offset of a chunk."""
+        with self.metadata_lock:
+            if file_path in self.files:
+                self.files[file_path].chunk_offsets[chunk_id] = offset
+                if chunk_id == self.files[file_path].last_chunk_id:
+                    self.files[file_path].last_chunk_offset = offset
+                self._save_metadata()

@@ -189,3 +189,86 @@ class GFSClient:
             files = response['files']
             self.logger.debug(f"Retrieved file list: {files}")
             return files
+
+    def append_to_file(self, gfs_path: str, data: bytes):
+        """Append data to a file in GFS."""
+        self.logger.info(f"Starting append operation to {gfs_path}")
+        
+        # Get file metadata from master
+        with self._connect_to_master() as master_sock:
+            send_message(master_sock, {
+                'command': 'get_file_metadata',
+                'file_path': gfs_path
+            })
+            response = receive_message(master_sock)
+            if response['status'] != 'ok':
+                raise Exception(f"Failed to get file metadata: {response.get('message')}")
+            
+            metadata = response['metadata']
+            
+        # If file doesn't exist, create it
+        if not metadata:
+            self.logger.debug(f"File {gfs_path} doesn't exist, creating new file")
+            chunk = Chunk(data, gfs_path, 0)
+            self._store_chunk(chunk)
+            return
+        
+        # Get last chunk information
+        last_chunk_id = metadata.last_chunk_id
+        last_chunk_offset = metadata.last_chunk_offset
+        
+        # Check if we need a new chunk
+        if last_chunk_offset + len(data) > self.chunk_size:
+            # Create new chunk
+            self.logger.debug("Creating new chunk for append")
+            chunk = Chunk(data, gfs_path, len(metadata.chunk_ids))
+            self._store_chunk(chunk)
+        else:
+            # Append to existing chunk
+            self.logger.debug(f"Appending to existing chunk {last_chunk_id}")
+            self._append_to_chunk(gfs_path, last_chunk_id, data, last_chunk_offset)
+
+    def _append_to_chunk(self, file_path: str, chunk_id: str, data: bytes, offset: int):
+        """Append data to an existing chunk."""
+        # Get chunk locations
+        with self._connect_to_master() as master_sock:
+            send_message(master_sock, {
+                'command': 'get_chunk_locations',
+                'file_path': file_path,
+                'chunk_id': chunk_id
+            })
+            response = receive_message(master_sock)
+            locations = response['locations']
+        
+        if not locations:
+            raise Exception(f"No locations found for chunk {chunk_id}")
+        
+        # Send append request to primary chunk server
+        primary_server = locations[0]
+        try:
+            with self._connect_to_chunk_server(primary_server) as chunk_sock:
+                send_message(chunk_sock, {
+                    'command': 'append_chunk',
+                    'chunk_id': chunk_id,
+                    'data': data,
+                    'offset': offset,
+                    'file_path': file_path
+                })
+                response = receive_message(chunk_sock)
+                if response['status'] != 'ok':
+                    raise Exception(f"Failed to append: {response.get('message')}")
+                
+                new_offset = response['new_offset']
+                
+                # Update master with new offset
+                with self._connect_to_master() as master_sock:
+                    send_message(master_sock, {
+                        'command': 'update_chunk_offset',
+                        'file_path': file_path,
+                        'chunk_id': chunk_id,
+                        'offset': new_offset
+                    })
+        
+        except Exception as e:
+            self.logger.error(f"Failed to append to chunk: {e}")
+            raise

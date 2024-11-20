@@ -151,6 +151,8 @@ class ChunkServer:
                     self._handle_delete_chunk(client_socket, message)
                 elif command == 'replicate_chunk':
                     self._handle_store_chunk(client_socket, message)
+                elif command == 'append_chunk':
+                    self._handle_append_chunk(client_socket, message)
 
         except Exception as e:
             self.logger.error(f"Error handling client {address}: {e}", exc_info=True)
@@ -283,6 +285,66 @@ class ChunkServer:
             self.logger.info(f"Successfully processed delete request for chunk {chunk_id}")
         except Exception as e:
             self.logger.error(f"Failed to delete chunk: {e}", exc_info=True)
+            send_message(client_socket, {
+                'status': 'error',
+                'message': str(e)
+            })
+
+    def _handle_append_chunk(self, client_socket: socket.socket, message: Dict):
+        """Handle appending data to a chunk."""
+        try:
+            chunk_id = message['chunk_id']
+            data = message['data']
+            offset = message['offset']
+            file_path = message['file_path']
+            
+            self.logger.info(f"Appending to chunk {chunk_id} at offset {offset}")
+            
+            # Load existing chunk
+            chunk_path = os.path.join(self.data_dir, chunk_id)
+            with open(chunk_path, 'rb+') as f:
+                # Seek to offset
+                f.seek(offset)
+                # Write new data
+                f.write(data)
+                new_offset = f.tell()
+            
+            # If this is the primary, propagate to replicas
+            if 'replica_servers' not in message:
+                # Get replica locations from master
+                with self._connect_to_master() as master_sock:
+                    send_message(master_sock, {
+                        'command': 'get_replica_locations',
+                        'excluding': self.address
+                    })
+                    response = receive_message(master_sock)
+                    replica_servers = response['locations']
+                
+                # Forward append to replicas
+                for replica in replica_servers:
+                    try:
+                        with self._connect_to_chunk_server(replica) as replica_sock:
+                            send_message(replica_sock, {
+                                'command': 'append_chunk',
+                                'chunk_id': chunk_id,
+                                'data': data,
+                                'offset': offset,
+                                'file_path': file_path,
+                                'replica_servers': True  # Mark as replica operation
+                            })
+                            response = receive_message(replica_sock)
+                            if response['status'] != 'ok':
+                                raise Exception(f"Replica append failed at {replica}")
+                    except Exception as e:
+                        self.logger.error(f"Failed to propagate append to replica {replica}: {e}")
+            
+            send_message(client_socket, {
+                'status': 'ok',
+                'new_offset': new_offset
+            })
+            
+        except Exception as e:
+            self.logger.error(f"Failed to append to chunk: {e}", exc_info=True)
             send_message(client_socket, {
                 'status': 'error',
                 'message': str(e)
