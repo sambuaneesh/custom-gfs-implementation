@@ -8,7 +8,7 @@ A simplified implementation of the Google File System in Python, featuring a mas
 - **Chunk Servers**: Store and serve file chunks with replication
 - **Client Interface**: Web-based interface using Streamlit
 - **Configuration**: TOML-based configuration system
-- **Logging**: Comprehensive logging system for all components
+- **Logging**: Comprehensive logging system with transaction tracking
 
 ## Directory Structure
 
@@ -134,6 +134,7 @@ The web interface provides:
 - Heartbeat monitoring
 - Server information persistence
 - Hot-plug capability (add/remove servers)
+- Two-phase commit protocol for data consistency
 
 ### File Operations
 
@@ -144,27 +145,47 @@ The web interface provides:
 - Record append operations
 - Fault tolerance
 
-### Append Operations
+### Transaction Management
 
-- Atomic append-at-offset operations
-- Automatic new chunk creation when size limit exceeded
-- Chunk offset tracking
-- Sequential consistency for appends
-- Replication of appended data
+- Two-phase commit protocol implementation
+- Transaction logging with phases:
+  - START: Initial transaction setup
+  - PREPARE: Preparation phase
+  - COMMIT: Commit phase
+  - ROLLBACK: Rollback phase
+  - REPLICATE: Replication phase
+- Colored console output for different transaction phases
+- Detailed transaction history in log files
 
-### Logging
+### Logging System
 
 - Comprehensive logging for all components
+- Transaction-specific logging
+- Color-coded console output:
+  - White: Transaction start
+  - Magenta: Prepare phase
+  - Blue: Commit phase
+  - Red: Rollback/Error messages
+  - Yellow: Replication operations
 - Separate log files for each component
-- Debug and info level logging
-- Console and file logging
+- Transaction logs in dedicated directory
 
-### Data Persistence
+### Data Consistency
 
-- Metadata persistence in JSON format
-- Chunk data persistence on disk
-- Server configuration persistence
-- Automatic recovery after restarts
+- Two-phase commit protocol ensures:
+  - All chunk servers prepare successfully before commit
+  - Atomic commits across all replicas
+  - Proper rollback on failures
+  - Transaction logging for recovery
+- Primary-based replication chain
+- Sequential consistency for writes
+
+### Monitoring
+
+- Real-time transaction status in console
+- Detailed transaction logs
+- Component-specific log files
+- Server health monitoring through heartbeats
 
 ## Monitoring
 
@@ -319,27 +340,50 @@ python run_chunk_server.py --id chunk1 --config custom_config.toml
    - Implement diagnostic tools
    - Add system statistics
 
+6. **Consistency Improvements**
+   - Implement two-phase commit protocol
+   - Add proper lease management
+   - Implement atomic operations
+   - Add snapshot support
+
 ## Implementation Details
 
-### Append Operation Flow
-1. Client requests append to file
-2. Master provides last chunk information
-3. If chunk has space:
-   - Append to existing chunk
-   - Update offsets
-4. If chunk is full:
-   - Create new chunk
-   - Start fresh offset tracking
-5. Replicate changes to secondary servers
+### Two-Phase Commit Protocol
+1. **Phase 1 (Prepare)**
+   - Primary receives store/append request
+   - Primary prepares temporary storage
+   - Primary coordinates with replicas
+   - All replicas prepare temporary storage
+   - Success only if all servers prepare successfully
+
+2. **Phase 2 (Commit/Rollback)**
+   - If all prepared: Commit changes on all servers
+   - If any failed: Rollback all prepared servers
+   - Update master metadata on successful commit
+   - Clean up temporary files on rollback
+
+### Transaction Logging
+1. **Console Output**
+   - Color-coded transaction phases
+   - Real-time status updates
+   - Success/failure indicators
+   - Detailed error messages
+
+2. **File Logging**
+   - Transaction logs in `logs/transactions/`
+   - Component logs in `logs/`
+   - Detailed timing information
+   - Complete transaction history
 
 ### Chunk Management
-1. Each chunk maintains:
-   - Current offset
-   - File path
-   - Chunk index
-   - Size information
-2. Master tracks:
-   - Chunk locations
-   - Chunk offsets
-   - Last chunk information
-   - Total file size
+1. **Primary Operations**
+   - Receives client requests
+   - Coordinates two-phase commit
+   - Manages replication chain
+   - Updates master metadata
+
+2. **Replica Operations**
+   - Participates in two-phase commit
+   - Maintains temporary storage
+   - Handles rollbacks
+   - Reports status to primary

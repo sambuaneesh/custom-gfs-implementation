@@ -3,7 +3,7 @@
 ## Component Overview
 
 ### Core Components
-W
+
 1. **Master Server (`src/master.py`)**
    - Manages metadata for all files
    - Coordinates chunk servers
