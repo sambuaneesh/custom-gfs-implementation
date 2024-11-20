@@ -16,7 +16,7 @@ class MasterServer:
         self.config = toml.load(config_path)
         self.logger.debug(f"Loaded configuration: {self.config}")
         
-        self.file_manager = FileManager("data/metadata")
+        self.file_manager = FileManager("data/metadata", self.config)
         self.chunk_servers: Dict[str, float] = {}
         self.chunk_server_lock = threading.Lock()
         

@@ -302,12 +302,29 @@ class ChunkServer:
             
             # Load existing chunk
             chunk_path = os.path.join(self.data_dir, chunk_id)
-            with open(chunk_path, 'rb+') as f:
-                # Seek to offset
-                f.seek(offset)
-                # Write new data
-                f.write(data)
-                new_offset = f.tell()
+            
+            # If the file doesn't exist, create it with the data
+            if not os.path.exists(chunk_path):
+                self.logger.debug(f"Chunk file doesn't exist, creating new file")
+                with open(chunk_path, 'wb') as f:
+                    f.write(data)
+                new_offset = len(data)
+            else:
+                # Append to existing file
+                with open(chunk_path, 'rb+') as f:
+                    # Get current file size
+                    f.seek(0, 2)  # Seek to end
+                    current_size = f.tell()
+                    
+                    # Verify offset
+                    if offset != current_size:
+                        self.logger.warning(f"Offset mismatch: expected {current_size}, got {offset}")
+                    
+                    # Write new data at the end
+                    f.write(data)
+                    new_offset = f.tell()
+            
+            self.logger.debug(f"New offset after append: {new_offset}")
             
             # If this is the primary, propagate to replicas
             if 'replica_servers' not in message:

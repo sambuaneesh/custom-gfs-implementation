@@ -247,6 +247,7 @@ class GFSClient:
         primary_server = locations[0]
         try:
             with self._connect_to_chunk_server(primary_server) as chunk_sock:
+                self.logger.debug(f"Appending {len(data)} bytes at offset {offset}")
                 send_message(chunk_sock, {
                     'command': 'append_chunk',
                     'chunk_id': chunk_id,
@@ -259,6 +260,7 @@ class GFSClient:
                     raise Exception(f"Failed to append: {response.get('message')}")
                 
                 new_offset = response['new_offset']
+                self.logger.debug(f"New offset after append: {new_offset}")
                 
                 # Update master with new offset
                 with self._connect_to_master() as master_sock:

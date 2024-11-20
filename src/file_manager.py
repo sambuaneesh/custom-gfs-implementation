@@ -16,13 +16,15 @@ class FileMetadata:
     last_chunk_offset: int  # Current offset in the last chunk
 
 class FileManager:
-    def __init__(self, metadata_dir: str):
+    def __init__(self, metadata_dir: str, config: Dict):
         self.logger = GFSLogger.get_logger('file_manager')
         self.logger.info(f"Initializing FileManager with metadata directory: {metadata_dir}")
         
         self.metadata_dir = metadata_dir
         self.metadata_lock = threading.Lock()
         self.files: Dict[str, FileMetadata] = {}
+        self.config = config
+        self.logger.debug(f"Initialized with config: {config}")
         self._load_metadata()
 
     def _load_metadata(self):
@@ -66,7 +68,7 @@ class FileManager:
                 chunk_locations={},
                 chunk_offsets={chunk_id: 0 for chunk_id in chunk_ids},
                 last_chunk_id=chunk_ids[-1] if chunk_ids else None,
-                last_chunk_offset=0
+                last_chunk_offset=total_size % self.config['master']['chunk_size']  # Initialize with correct offset
             )
             self._save_metadata()
         self.logger.info(f"Successfully added file {file_path}")
@@ -116,9 +118,22 @@ class FileManager:
 
     def update_chunk_offset(self, file_path: str, chunk_id: str, offset: int):
         """Update the offset of a chunk."""
+        self.logger.debug(f"Updating offset for chunk {chunk_id} in file {file_path} to {offset}")
         with self.metadata_lock:
             if file_path in self.files:
+                # Update the chunk's offset
                 self.files[file_path].chunk_offsets[chunk_id] = offset
+                
+                # If this is the last chunk, update the last_chunk_offset
                 if chunk_id == self.files[file_path].last_chunk_id:
                     self.files[file_path].last_chunk_offset = offset
+                
+                # Update total file size
+                chunk_index = self.files[file_path].chunk_ids.index(chunk_id)
+                total_size = chunk_index * self.config['master']['chunk_size'] + offset
+                self.files[file_path].total_size = total_size
+                
                 self._save_metadata()
+                self.logger.debug(f"Updated offsets and total size for {file_path}")
+            else:
+                self.logger.warning(f"Attempted to update offset for non-existent file: {file_path}")

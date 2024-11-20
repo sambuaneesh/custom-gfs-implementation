@@ -7,7 +7,12 @@ master:
 	python run_master.py
 
 chunk:
-	python run_chunk_server.py --id $(word 2,$(MAKECMDGOALS))
+	$(eval ID := $(filter-out $@,$(MAKECMDGOALS)))
+	@if [ "$(ID)" != "" ]; then \
+		python run_chunk_server.py --id $(ID); \
+	else \
+		python run_chunk_server.py; \
+	fi
 
 client:
 	streamlit run interfaces/streamlit_app.py --server.maxUploadSize 10000
