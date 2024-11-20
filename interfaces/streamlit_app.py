@@ -22,7 +22,7 @@ def main():
     # Sidebar for operations
     operation = st.sidebar.selectbox(
         "Select Operation",
-        ["Upload File", "Download File", "List Files"]
+        ["Upload File", "Download File", "List Files", "Append to File"]
     )
     logger.debug(f"Selected operation: {operation}")
 
@@ -70,9 +70,9 @@ def main():
         logger.debug("Rendering download file interface")
         st.header("Download File")
         files = client.list_files()
-        selected_file = st.selectbox("Select File to Download", files)
+        selected_file = st.selectbox("Select File to Download", files if files else ["No files available"])
 
-        if selected_file and st.button("Download"):
+        if selected_file and selected_file != "No files available" and st.button("Download"):
             logger.info(f"Starting download of {selected_file}")
             try:
                 # Download file
@@ -105,6 +105,49 @@ def main():
         else:
             logger.info("No files found in GFS")
             st.info("No files found in GFS")
+
+    elif operation == "Append to File":
+        logger.debug("Rendering append interface")
+        st.header("Append to File")
+        
+        # Get list of files
+        files = client.list_files()
+        if not files:
+            st.warning("No files available in GFS")
+            return
+
+        # File selection
+        selected_file = st.selectbox("Select File to Append to", files)
+        
+        # Text input for append data
+        append_data = st.text_area("Enter text to append", "")
+        
+        # File upload for append
+        uploaded_file = st.file_uploader("Or choose a file to append")
+        
+        if st.button("Append"):
+            try:
+                # Check if either text or file is provided
+                if not append_data and not uploaded_file:
+                    st.error("Please provide either text or a file to append")
+                    return
+
+                # Get the data to append
+                if append_data:
+                    data_to_append = append_data.encode('utf-8')
+                    logger.debug(f"Appending text data of size {len(data_to_append)} bytes")
+                else:
+                    data_to_append = uploaded_file.read()
+                    logger.debug(f"Appending file data of size {len(data_to_append)} bytes")
+
+                # Perform append operation
+                client.append_to_file(selected_file, data_to_append)
+                st.success("Successfully appended to file!")
+                logger.info(f"Successfully appended to {selected_file}")
+
+            except Exception as e:
+                logger.error(f"Append failed: {e}", exc_info=True)
+                st.error(f"Append failed: {str(e)}")
 
 if __name__ == "__main__":
     main() 
