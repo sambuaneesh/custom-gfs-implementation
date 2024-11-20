@@ -141,7 +141,16 @@ The web interface provides:
 - Configurable chunk size
 - Configurable replication factor
 - Automatic chunk distribution
+- Record append operations
 - Fault tolerance
+
+### Append Operations
+
+- Atomic append-at-offset operations
+- Automatic new chunk creation when size limit exceeded
+- Chunk offset tracking
+- Sequential consistency for appends
+- Replication of appended data
 
 ### Logging
 
@@ -224,16 +233,38 @@ python run_chunk_server.py --id chunk1 --config custom_config.toml
 ## Limitations and Missing Features Compared to Real GFS
 
 ### Architecture Differences
+- **Single-Phase Commit**: Current implementation uses single-phase commit protocol instead of the two-phase commit used in real GFS
 - **Single Master**: No master replication or failover (Real GFS has shadow masters)
 - **Simplified Chunk Management**: Basic chunk allocation without load balancing
 - **Limited Metadata Operations**: No namespace management or snapshot support
 - **No Lease Management**: Real GFS uses chunk leases for consistency
 
+### Commit Protocol Differences
+1. **Current Implementation (Single-Phase)**
+   - Primary chunk server receives data
+   - Primary directly writes and forwards to replicas
+   - No explicit preparation phase
+   - No verification of replica readiness
+   - Faster but less reliable
+
+2. **Real GFS (Two-Phase)**
+   - Phase 1 (Preparation):
+     - Primary sends data to all replicas
+     - Replicas acknowledge receipt
+     - Replicas prepare but don't commit
+   - Phase 2 (Commit):
+     - Primary verifies all replicas are ready
+     - Primary sends commit command
+     - Replicas commit changes
+     - Replicas acknowledge commit
+   - More reliable but slower
+
 ### Missing Features
 1. **Consistency Model**
-   - No atomic record append operations
-   - No snapshot functionality
    - Limited consistency guarantees
+   - No proper two-phase commit protocol
+   - No atomic record append operations across chunks
+   - No snapshot functionality
 
 2. **Performance Optimizations**
    - No flow control
@@ -287,3 +318,28 @@ python run_chunk_server.py --id chunk1 --config custom_config.toml
    - Add monitoring interface
    - Implement diagnostic tools
    - Add system statistics
+
+## Implementation Details
+
+### Append Operation Flow
+1. Client requests append to file
+2. Master provides last chunk information
+3. If chunk has space:
+   - Append to existing chunk
+   - Update offsets
+4. If chunk is full:
+   - Create new chunk
+   - Start fresh offset tracking
+5. Replicate changes to secondary servers
+
+### Chunk Management
+1. Each chunk maintains:
+   - Current offset
+   - File path
+   - Chunk index
+   - Size information
+2. Master tracks:
+   - Chunk locations
+   - Chunk offsets
+   - Last chunk information
+   - Total file size

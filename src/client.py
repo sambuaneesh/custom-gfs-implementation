@@ -209,8 +209,7 @@ class GFSClient:
         # If file doesn't exist, create it
         if not metadata:
             self.logger.debug(f"File {gfs_path} doesn't exist, creating new file")
-            chunk = Chunk(data, gfs_path, 0)
-            self._store_chunk(chunk)
+            self.upload_file_from_bytes(data, gfs_path)
             return
         
         # Get last chunk information
@@ -219,10 +218,10 @@ class GFSClient:
         
         # Check if we need a new chunk
         if last_chunk_offset + len(data) > self.chunk_size:
-            # Create new chunk
-            self.logger.debug("Creating new chunk for append")
-            chunk = Chunk(data, gfs_path, len(metadata.chunk_ids))
-            self._store_chunk(chunk)
+            self.logger.debug("Data exceeds chunk size, creating new chunk")
+            # Create new chunk with the data
+            chunk_index = len(metadata.chunk_ids)
+            self.upload_file_from_bytes(data, gfs_path, chunk_index)
         else:
             # Append to existing chunk
             self.logger.debug(f"Appending to existing chunk {last_chunk_id}")
@@ -273,4 +272,53 @@ class GFSClient:
         
         except Exception as e:
             self.logger.error(f"Failed to append to chunk: {e}")
+            raise
+
+    def upload_file_from_bytes(self, data: bytes, gfs_path: str, chunk_index: int = 0):
+        """Upload data as a new chunk."""
+        self.logger.info(f"Creating new chunk for {gfs_path} at index {chunk_index}")
+        
+        # Check for available chunk servers
+        available_servers = self._get_available_chunk_servers()
+        if not available_servers:
+            raise Exception("No chunk servers available")
+        
+        # Create chunk
+        chunk = Chunk(data, gfs_path, chunk_index)
+        chunk_id = chunk.chunk_id
+        
+        # Select primary server
+        primary_server = random.choice(available_servers)
+        self.logger.debug(f"Selected primary server: {primary_server}")
+        
+        try:
+            # Send chunk to primary server
+            with self._connect_to_chunk_server(primary_server) as chunk_sock:
+                send_message(chunk_sock, {
+                    'command': 'store_chunk',
+                    'data': data,
+                    'file_path': gfs_path,
+                    'chunk_index': chunk_index
+                })
+                response = receive_message(chunk_sock)
+                if response['status'] != 'ok':
+                    raise Exception(f"Failed to store chunk: {response.get('message')}")
+            
+            # Update master with new chunk information
+            with self._connect_to_master() as master_sock:
+                send_message(master_sock, {
+                    'command': 'add_chunk',
+                    'file_path': gfs_path,
+                    'chunk_id': chunk_id,
+                    'chunk_index': chunk_index,
+                    'size': len(data)
+                })
+                response = receive_message(master_sock)
+                if response['status'] != 'ok':
+                    raise Exception(f"Failed to update master: {response.get('message')}")
+            
+            self.logger.info(f"Successfully created new chunk {chunk_id}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create new chunk: {e}")
             raise

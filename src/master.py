@@ -86,6 +86,8 @@ class MasterServer:
                     self._handle_get_replica_locations(client_socket, message)
                 elif command == 'update_chunk_offset':
                     self._handle_update_chunk_offset(client_socket, message)
+                elif command == 'add_chunk':
+                    self._handle_add_chunk(client_socket, message)
 
         except Exception as e:
             self.logger.error(f"Error handling client {address}: {e}", exc_info=True)
@@ -209,6 +211,45 @@ class MasterServer:
             send_message(client_socket, {'status': 'ok'})
         except Exception as e:
             self.logger.error(f"Failed to update chunk offset: {e}")
+            send_message(client_socket, {
+                'status': 'error',
+                'message': str(e)
+            })
+
+    def _handle_add_chunk(self, client_socket: socket.socket, message: Dict):
+        """Handle adding a new chunk to an existing file."""
+        try:
+            file_path = message['file_path']
+            chunk_id = message['chunk_id']
+            chunk_index = message['chunk_index']
+            size = message['size']
+            
+            self.logger.debug(f"Adding chunk {chunk_id} to file {file_path}")
+            
+            with self.chunk_server_lock:
+                metadata = self.file_manager.get_file_metadata(file_path)
+                if metadata:
+                    # Update existing file
+                    metadata.chunk_ids.append(chunk_id)
+                    metadata.chunk_offsets[chunk_id] = size
+                    metadata.last_chunk_id = chunk_id
+                    metadata.last_chunk_offset = size
+                    metadata.total_size += size
+                else:
+                    # Create new file
+                    self.file_manager.add_file(
+                        file_path=file_path,
+                        total_size=size,
+                        chunk_ids=[chunk_id]
+                    )
+                
+                self.file_manager._save_metadata()
+                
+            send_message(client_socket, {'status': 'ok'})
+            self.logger.info(f"Successfully added chunk {chunk_id} to {file_path}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to add chunk: {e}")
             send_message(client_socket, {
                 'status': 'error',
                 'message': str(e)
