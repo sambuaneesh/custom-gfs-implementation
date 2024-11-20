@@ -221,18 +221,69 @@ python run_chunk_server.py --id chunk1 --config custom_config.toml
 - Monitor `server_info.json` for chunk server status
 - Review `metadata.json` for file tracking
 
-## Limitations
+## Limitations and Missing Features Compared to Real GFS
 
-- Single master server (no failover)
-- Basic replication strategy
-- No authentication/authorization
-- No data encryption
-- Limited fault tolerance
-<!-- 
+### Architecture Differences
+- **Single Master**: No master replication or failover (Real GFS has shadow masters)
+- **Simplified Chunk Management**: Basic chunk allocation without load balancing
+- **Limited Metadata Operations**: No namespace management or snapshot support
+- **No Lease Management**: Real GFS uses chunk leases for consistency
+
+### Missing Features
+1. **Consistency Model**
+   - No atomic record append operations
+   - No snapshot functionality
+   - Limited consistency guarantees
+
+2. **Performance Optimizations**
+   - No flow control
+   - No intelligent chunk placement
+   - No data flow optimization
+   - No checksum for data integrity
+
+3. **Security**
+   - No authentication/authorization
+   - No encryption (in-transit or at-rest)
+   - No access control lists
+
+4. **Recovery Mechanisms**
+   - Limited chunk re-replication
+   - No master state recovery
+   - No automatic chunk server recovery
+
+5. **Advanced Operations**
+   - No atomic operations
+   - No record append functionality
+   - No snapshot support
+   - No garbage collection
+
+6. **Monitoring and Maintenance**
+   - No monitoring interface
+   - No diagnostic tools
+   - Limited system statistics
+
 ## Future Enhancements
+1. **High Availability**
+   - Implement shadow masters
+   - Add master state replication
+   - Implement chunk server failover
 
-- Master server failover
-- Enhanced security features
-- Better load balancing
-- Chunk server recovery mechanisms
-- Advanced replication strategies -->
+2. **Data Consistency**
+   - Add lease management
+   - Implement atomic operations
+   - Add snapshot support
+
+3. **Security**
+   - Add authentication system
+   - Implement encryption
+   - Add access control
+
+4. **Performance**
+   - Implement intelligent chunk placement
+   - Add flow control
+   - Optimize data flow
+
+5. **Monitoring**
+   - Add monitoring interface
+   - Implement diagnostic tools
+   - Add system statistics
