@@ -6,10 +6,12 @@ from .utils import send_message, receive_message
 from .chunk import Chunk
 from .logger import GFSLogger
 import random
+import time
 
 class GFSClient:
     def __init__(self, config_path: str):
         self.logger = GFSLogger.get_logger('client')
+        self.transaction_logger = GFSLogger.get_transaction_logger('client')
         self.logger.info(f"Initializing GFS Client with config from {config_path}")
         
         self.config = toml.load(config_path)
@@ -52,7 +54,7 @@ class GFSClient:
         """Upload a file to GFS."""
         self.logger.info(f"Starting upload of {local_path} to GFS path {gfs_path}")
         
-        # Check for available chunk servers first
+        # Check for available chunk servers
         available_servers = self._get_available_chunk_servers()
         self.logger.info(f"Found {len(available_servers)} available chunk servers")
         
@@ -76,35 +78,20 @@ class GFSClient:
             chunk_ids.append(chunk.chunk_id)
         self.logger.info(f"Split file into {len(chunks)} chunks")
 
-        # First, add file metadata to master
-        with self._connect_to_master() as master_sock:
-            self.logger.debug("Adding file metadata to master")
-            send_message(master_sock, {
-                'command': 'add_file',
-                'file_path': gfs_path,
-                'total_size': total_size,
-                'chunk_ids': chunk_ids
-            })
-            response = receive_message(master_sock)
-            if response.get('status') != 'ok':
-                raise Exception(f"Failed to add file metadata: {response.get('message')}")
-
-        # Store chunks on primary chunk servers
+        # Store chunks through primary servers
         for chunk in chunks:
-            self.logger.debug(f"Processing chunk {chunk.chunk_id} (index: {chunk.chunk_index})")
-            
-            # Select primary server for this chunk
+            # Select primary server
             primary_server = random.choice(available_servers)
-            self.logger.debug(f"Selected primary server for chunk: {primary_server}")
+            self.logger.debug(f"Selected primary server {primary_server} for chunk {chunk.chunk_id}")
             
             try:
-                # Send chunk to primary server, which will handle replication
                 with self._connect_to_chunk_server(primary_server) as chunk_sock:
                     send_message(chunk_sock, {
                         'command': 'store_chunk',
                         'data': chunk.data,
                         'file_path': chunk.file_path,
-                        'chunk_index': chunk.chunk_index
+                        'chunk_index': chunk.chunk_index,
+                        'chunk_id': chunk.chunk_id
                     })
                     response = receive_message(chunk_sock)
                     if response['status'] != 'ok':
@@ -228,7 +215,7 @@ class GFSClient:
             self._append_to_chunk(gfs_path, last_chunk_id, data, last_chunk_offset)
 
     def _append_to_chunk(self, file_path: str, chunk_id: str, data: bytes, offset: int):
-        """Append data to an existing chunk."""
+        """Append data to an existing chunk using two-phase commit."""
         # Get chunk locations
         with self._connect_to_master() as master_sock:
             send_message(master_sock, {
@@ -242,37 +229,268 @@ class GFSClient:
         if not locations:
             raise Exception(f"No locations found for chunk {chunk_id}")
         
-        # Send append request to primary chunk server
-        primary_server = locations[0]
-        try:
-            with self._connect_to_chunk_server(primary_server) as chunk_sock:
-                self.logger.debug(f"Appending {len(data)} bytes at offset {offset}")
-                send_message(chunk_sock, {
-                    'command': 'append_chunk',
-                    'chunk_id': chunk_id,
-                    'data': data,
-                    'offset': offset,
-                    'file_path': file_path
-                })
-                response = receive_message(chunk_sock)
-                if response['status'] != 'ok':
-                    raise Exception(f"Failed to append: {response.get('message')}")
-                
-                new_offset = response['new_offset']
-                self.logger.debug(f"New offset after append: {new_offset}")
-                
-                # Update master with new offset
-                with self._connect_to_master() as master_sock:
-                    send_message(master_sock, {
-                        'command': 'update_chunk_offset',
-                        'file_path': file_path,
-                        'chunk_id': chunk_id,
-                        'offset': new_offset
-                    })
+        # Execute two-phase commit
+        success = self._two_phase_append(file_path, chunk_id, data, offset, locations)
         
+        if success:
+            # Update master with new offset
+            new_offset = offset + len(data)
+            with self._connect_to_master() as master_sock:
+                send_message(master_sock, {
+                    'command': 'update_chunk_offset',
+                    'file_path': file_path,
+                    'chunk_id': chunk_id,
+                    'offset': new_offset
+                })
+        else:
+            raise Exception("Failed to append data: two-phase commit failed")
+
+    def _two_phase_append(self, file_path: str, chunk_id: str, data: bytes, offset: int, 
+                         locations: List[str]) -> bool:
+        """Execute two-phase commit protocol for append operation."""
+        transaction_id = str(int(time.time() * 1000))
+        
+        GFSLogger.log_transaction(
+            self.transaction_logger,
+            transaction_id,
+            "START",
+            f"Starting transaction for chunk {chunk_id}"
+        )
+        
+        primary_server = locations[0]
+        replica_servers = locations[1:]
+        
+        GFSLogger.log_transaction(
+            self.transaction_logger,
+            transaction_id,
+            "PREPARE",
+            f"Primary: {primary_server}, Replicas: {replica_servers}"
+        )
+        
+        try:
+            # Phase 1: Prepare
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "PREPARE",
+                "📝 PHASE 1: PREPARE - Starting prepare phase"
+            )
+            prepared_servers = []
+            
+            # Prepare primary
+            try:
+                with self._connect_to_chunk_server(primary_server) as primary_sock:
+                    GFSLogger.log_transaction(
+                        self.transaction_logger,
+                        transaction_id,
+                        "PREPARE",
+                        f"Sending prepare request to primary {primary_server}"
+                    )
+                    send_message(primary_sock, {
+                        'command': 'prepare_append',
+                        'chunk_id': chunk_id,
+                        'data': data,
+                        'offset': offset,
+                        'transaction_id': transaction_id
+                    })
+                    response = receive_message(primary_sock)
+                    if response['status'] == 'ok':
+                        prepared_servers.append(primary_server)
+                        GFSLogger.log_transaction(
+                            self.transaction_logger,
+                            transaction_id,
+                            "PREPARE",
+                            f"✅ Primary {primary_server} prepared successfully"
+                        )
+                    else:
+                        GFSLogger.log_transaction(
+                            self.transaction_logger,
+                            transaction_id,
+                            "PREPARE",
+                            f"❌ Primary {primary_server} failed to prepare"
+                        )
+                        raise Exception(f"Primary server failed to prepare: {response.get('message')}")
+            except Exception as e:
+                GFSLogger.log_transaction(
+                    self.transaction_logger,
+                    transaction_id,
+                    "PREPARE",
+                    f"Failed to prepare primary: {e}"
+                )
+                return False
+            
+            # Prepare replicas
+            for replica in replica_servers:
+                try:
+                    with self._connect_to_chunk_server(replica) as replica_sock:
+                        GFSLogger.log_transaction(
+                            self.transaction_logger,
+                            transaction_id,
+                            "PREPARE",
+                            f"Sending prepare request to replica {replica}"
+                        )
+                        send_message(replica_sock, {
+                            'command': 'prepare_append',
+                            'chunk_id': chunk_id,
+                            'data': data,
+                            'offset': offset,
+                            'transaction_id': transaction_id
+                        })
+                        response = receive_message(replica_sock)
+                        if response['status'] == 'ok':
+                            prepared_servers.append(replica)
+                            GFSLogger.log_transaction(
+                                self.transaction_logger,
+                                transaction_id,
+                                "PREPARE",
+                                f"✅ Replica {replica} prepared successfully"
+                            )
+                        else:
+                            GFSLogger.log_transaction(
+                                self.transaction_logger,
+                                transaction_id,
+                                "PREPARE",
+                                f"❌ Replica {replica} failed to prepare"
+                            )
+                            raise Exception(f"Replica server failed to prepare: {response.get('message')}")
+                except Exception as e:
+                    GFSLogger.log_transaction(
+                        self.transaction_logger,
+                        transaction_id,
+                        "PREPARE",
+                        f"Failed to prepare replica {replica}: {e}"
+                    )
+                    break
+            
+            # Phase 2: Commit or Rollback
+            if len(prepared_servers) == len(locations):
+                # All servers prepared successfully, commit
+                GFSLogger.log_transaction(
+                    self.transaction_logger,
+                    transaction_id,
+                    "COMMIT",
+                    "📝 PHASE 2: COMMIT - All servers prepared, starting commit phase"
+                )
+                committed_servers = []
+                
+                for server in prepared_servers:
+                    try:
+                        with self._connect_to_chunk_server(server) as server_sock:
+                            GFSLogger.log_transaction(
+                                self.transaction_logger,
+                                transaction_id,
+                                "COMMIT",
+                                f"Sending commit request to {server}"
+                            )
+                            send_message(server_sock, {
+                                'command': 'commit_append',
+                                'chunk_id': chunk_id,
+                                'transaction_id': transaction_id
+                            })
+                            response = receive_message(server_sock)
+                            if response['status'] == 'ok':
+                                committed_servers.append(server)
+                                GFSLogger.log_transaction(
+                                    self.transaction_logger,
+                                    transaction_id,
+                                    "COMMIT",
+                                    f"✅ Server {server} committed successfully"
+                                )
+                    except Exception as e:
+                        GFSLogger.log_transaction(
+                            self.transaction_logger,
+                            transaction_id,
+                            "COMMIT",
+                            f"Failed to commit on server {server}: {e}"
+                        )
+                        break
+                
+                success = len(committed_servers) == len(locations)
+                if success:
+                    GFSLogger.log_transaction(
+                        self.transaction_logger,
+                        transaction_id,
+                        "COMMIT",
+                        "🎉 Transaction completed successfully"
+                    )
+                else:
+                    GFSLogger.log_transaction(
+                        self.transaction_logger,
+                        transaction_id,
+                        "COMMIT",
+                        "❌ Transaction failed during commit phase"
+                    )
+                return success
+                
+            else:
+                # Not all servers prepared, rollback
+                GFSLogger.log_transaction(
+                    self.transaction_logger,
+                    transaction_id,
+                    "ROLLBACK",
+                    "⚠️ Not all servers prepared, initiating rollback"
+                )
+                for server in prepared_servers:
+                    try:
+                        with self._connect_to_chunk_server(server) as server_sock:
+                            GFSLogger.log_transaction(
+                                self.transaction_logger,
+                                transaction_id,
+                                "ROLLBACK",
+                                f"Sending rollback request to {server}"
+                            )
+                            send_message(server_sock, {
+                                'command': 'rollback_append',
+                                'chunk_id': chunk_id,
+                                'transaction_id': transaction_id
+                            })
+                            GFSLogger.log_transaction(
+                                self.transaction_logger,
+                                transaction_id,
+                                "ROLLBACK",
+                                f"✅ Rollback successful on {server}"
+                            )
+                    except Exception as e:
+                        GFSLogger.log_transaction(
+                            self.transaction_logger,
+                            transaction_id,
+                            "ROLLBACK",
+                            f"Failed to rollback on server {server}: {e}"
+                        )
+                
+                return False
+                
         except Exception as e:
-            self.logger.error(f"Failed to append to chunk: {e}")
-            raise
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "ROLLBACK",
+                f"Two-phase commit failed: {e}",
+                exc_info=True
+            )
+            # Attempt rollback
+            for server in prepared_servers:
+                try:
+                    with self._connect_to_chunk_server(server) as server_sock:
+                        GFSLogger.log_transaction(
+                            self.transaction_logger,
+                            transaction_id,
+                            "ROLLBACK",
+                            f"Sending rollback request to {server}"
+                        )
+                        send_message(server_sock, {
+                            'command': 'rollback_append',
+                            'chunk_id': chunk_id,
+                            'transaction_id': transaction_id
+                        })
+                except Exception as rollback_error:
+                    GFSLogger.log_transaction(
+                        self.transaction_logger,
+                        transaction_id,
+                        "ROLLBACK",
+                        f"Failed to rollback on server {server}: {rollback_error}"
+                    )
+            return False
 
     def upload_file_from_bytes(self, data: bytes, gfs_path: str, chunk_index: int = 0):
         """Upload data as a new chunk."""

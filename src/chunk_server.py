@@ -13,6 +13,7 @@ import json
 class ChunkServer:
     def __init__(self, config_path: str, server_id: str = None):
         self.logger = GFSLogger.get_logger('chunk_server')
+        self.transaction_logger = GFSLogger.get_transaction_logger('chunk_server')
         self.logger.info(f"Initializing Chunk Server with config from {config_path}")
         
         self.config = toml.load(config_path)
@@ -151,8 +152,20 @@ class ChunkServer:
                     self._handle_delete_chunk(client_socket, message)
                 elif command == 'replicate_chunk':
                     self._handle_store_chunk(client_socket, message)
+                elif command == 'prepare_chunk':
+                    self._handle_prepare_chunk(client_socket, message)
+                elif command == 'commit_chunk':
+                    self._handle_commit_chunk(client_socket, message)
+                elif command == 'rollback_chunk':
+                    self._handle_rollback_chunk(client_socket, message)
                 elif command == 'append_chunk':
                     self._handle_append_chunk(client_socket, message)
+                elif command == 'prepare_append':
+                    self._handle_prepare_append(client_socket, message)
+                elif command == 'commit_append':
+                    self._handle_commit_append(client_socket, message)
+                elif command == 'rollback_append':
+                    self._handle_rollback_append(client_socket, message)
 
         except Exception as e:
             self.logger.error(f"Error handling client {address}: {e}", exc_info=True)
@@ -195,51 +208,209 @@ class ChunkServer:
     def _handle_store_chunk(self, client_socket: socket.socket, message: Dict):
         """Handle storing a chunk and initiating replication if needed."""
         try:
-            self.logger.info(f"Storing chunk for file {message['file_path']}")
-            
-            if 'replica_servers' in message:
-                # This is part of a replication chain
-                chunk_id = self._replicate_chunk(
-                    message['data'],
-                    message['file_path'],
-                    message['chunk_index'],
-                    message['replica_servers'],
-                    message['current_replica']
-                )
-            else:
-                # This is the initial store from client
-                # Get replication targets from master
+            chunk_id = message.get('chunk_id')
+            file_path = message['file_path']
+            data = message['data']
+            transaction_id = str(int(time.time() * 1000))
+
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "START",
+                f"Primary received store request for chunk {chunk_id} of {file_path}"
+            )
+
+            # If this is the primary server (not part of replication chain)
+            if 'replica_servers' not in message:
+                # Get replica locations from master
                 with self._connect_to_master() as master_sock:
                     send_message(master_sock, {
                         'command': 'get_replica_locations',
                         'excluding': self.address
                     })
                     response = receive_message(master_sock)
-                    replica_servers = [self.address] + response['locations']
-                
-                chunk_id = self._replicate_chunk(
-                    message['data'],
-                    message['file_path'],
-                    message['chunk_index'],
-                    replica_servers,
-                    0
+                    replica_servers = response['locations']
+                    
+                GFSLogger.log_transaction(
+                    self.transaction_logger,
+                    transaction_id,
+                    "PREPARE",
+                    f"Starting two-phase commit with replicas: {replica_servers}"
                 )
+
+                # Phase 1: Prepare
+                prepared_servers = []
                 
-                # Update master with final chunk locations
-                with self._connect_to_master() as master_sock:
-                    send_message(master_sock, {
-                        'command': 'update_chunk_locations',
-                        'file_path': message['file_path'],
-                        'chunk_id': chunk_id,
-                        'locations': replica_servers
-                    })
-            
-            send_message(client_socket, {
-                'status': 'ok',
-                'chunk_id': chunk_id
-            })
-            self.logger.info(f"Successfully handled chunk {chunk_id}")
-            
+                # First prepare ourselves (primary)
+                temp_path = os.path.join(self.data_dir, f"{chunk_id}.{transaction_id}.temp")
+                try:
+                    with open(temp_path, 'wb') as f:
+                        f.write(data)
+                    prepared_servers.append(self.address)
+                    GFSLogger.log_transaction(
+                        self.transaction_logger,
+                        transaction_id,
+                        "PREPARE",
+                        "✅ Primary prepared successfully"
+                    )
+                except Exception as e:
+                    GFSLogger.log_transaction(
+                        self.transaction_logger,
+                        transaction_id,
+                        "PREPARE",
+                        f"❌ Primary prepare failed: {e}"
+                    )
+                    raise
+
+                # Then prepare replicas
+                for replica in replica_servers:
+                    try:
+                        with self._connect_to_chunk_server(replica) as replica_sock:
+                            GFSLogger.log_transaction(
+                                self.transaction_logger,
+                                transaction_id,
+                                "PREPARE",
+                                f"Sending prepare to replica {replica}"
+                            )
+                            send_message(replica_sock, {
+                                'command': 'prepare_chunk',
+                                'chunk_id': chunk_id,
+                                'data': data,
+                                'transaction_id': transaction_id,
+                                'file_path': file_path
+                            })
+                            response = receive_message(replica_sock)
+                            if response['status'] == 'ok':
+                                prepared_servers.append(replica)
+                                GFSLogger.log_transaction(
+                                    self.transaction_logger,
+                                    transaction_id,
+                                    "PREPARE",
+                                    f"✅ Replica {replica} prepared successfully"
+                                )
+                            else:
+                                raise Exception(f"Replica {replica} failed to prepare")
+                    except Exception as e:
+                        GFSLogger.log_transaction(
+                            self.transaction_logger,
+                            transaction_id,
+                            "PREPARE",
+                            f"❌ Failed to prepare replica {replica}: {e}"
+                        )
+                        break
+
+                # Phase 2: Commit or Rollback
+                if len(prepared_servers) == len(replica_servers) + 1:  # +1 for primary
+                    GFSLogger.log_transaction(
+                        self.transaction_logger,
+                        transaction_id,
+                        "COMMIT",
+                        "All servers prepared, starting commit phase"
+                    )
+                    
+                    # First commit ourselves
+                    chunk_path = os.path.join(self.data_dir, chunk_id)
+                    os.replace(temp_path, chunk_path)
+                    GFSLogger.log_transaction(
+                        self.transaction_logger,
+                        transaction_id,
+                        "COMMIT",
+                        "✅ Primary committed successfully"
+                    )
+
+                    # Then commit replicas
+                    committed_servers = [self.address]
+                    for replica in replica_servers:
+                        try:
+                            with self._connect_to_chunk_server(replica) as replica_sock:
+                                GFSLogger.log_transaction(
+                                    self.transaction_logger,
+                                    transaction_id,
+                                    "COMMIT",
+                                    f"Sending commit to replica {replica}"
+                                )
+                                send_message(replica_sock, {
+                                    'command': 'commit_chunk',
+                                    'chunk_id': chunk_id,
+                                    'transaction_id': transaction_id
+                                })
+                                response = receive_message(replica_sock)
+                                if response['status'] == 'ok':
+                                    committed_servers.append(replica)
+                                    GFSLogger.log_transaction(
+                                        self.transaction_logger,
+                                        transaction_id,
+                                        "COMMIT",
+                                        f"✅ Replica {replica} committed successfully"
+                                    )
+                        except Exception as e:
+                            GFSLogger.log_transaction(
+                                self.transaction_logger,
+                                transaction_id,
+                                "COMMIT",
+                                f"❌ Failed to commit on replica {replica}: {e}"
+                            )
+
+                    if len(committed_servers) == len(prepared_servers):
+                        GFSLogger.log_transaction(
+                            self.transaction_logger,
+                            transaction_id,
+                            "SUCCESS",
+                            "🎉 Transaction completed successfully"
+                        )
+                        send_message(client_socket, {
+                            'status': 'ok',
+                            'chunk_id': chunk_id
+                        })
+                    else:
+                        raise Exception("Not all servers committed successfully")
+
+                else:
+                    # Rollback if not all servers prepared
+                    GFSLogger.log_transaction(
+                        self.transaction_logger,
+                        transaction_id,
+                        "ROLLBACK",
+                        "Not all servers prepared, initiating rollback"
+                    )
+                    
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    
+                    for server in prepared_servers:
+                        if server != self.address:
+                            try:
+                                with self._connect_to_chunk_server(server) as server_sock:
+                                    send_message(server_sock, {
+                                        'command': 'rollback_chunk',
+                                        'chunk_id': chunk_id,
+                                        'transaction_id': transaction_id
+                                    })
+                                    GFSLogger.log_transaction(
+                                        self.transaction_logger,
+                                        transaction_id,
+                                        "ROLLBACK",
+                                        f"✅ Rolled back {server}"
+                                    )
+                            except Exception as e:
+                                GFSLogger.log_transaction(
+                                    self.transaction_logger,
+                                    transaction_id,
+                                    "ROLLBACK",
+                                    f"❌ Failed to rollback {server}: {e}"
+                                )
+                    
+                    raise Exception("Failed to prepare all servers")
+
+            else:
+                # We are a replica in the replication chain
+                chunk = Chunk(data, file_path, message.get('chunk_index', 0))
+                chunk.save_to_disk(self.data_dir)
+                send_message(client_socket, {
+                    'status': 'ok',
+                    'chunk_id': chunk.chunk_id
+                })
+
         except Exception as e:
             self.logger.error(f"Failed to store/replicate chunk: {e}", exc_info=True)
             send_message(client_socket, {
@@ -362,6 +533,287 @@ class ChunkServer:
             
         except Exception as e:
             self.logger.error(f"Failed to append to chunk: {e}", exc_info=True)
+            send_message(client_socket, {
+                'status': 'error',
+                'message': str(e)
+            })
+
+    def _handle_prepare_append(self, client_socket: socket.socket, message: Dict):
+        """Handle preparation phase of append operation."""
+        try:
+            chunk_id = message['chunk_id']
+            transaction_id = message.get('transaction_id')
+            
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "PREPARE",
+                f"Received prepare request for chunk {chunk_id}"
+            )
+            
+            temp_path = os.path.join(self.data_dir, f"{chunk_id}.{transaction_id}.temp")
+            chunk_path = os.path.join(self.data_dir, chunk_id)
+            
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "PREPARE",
+                f"Creating temporary file at {temp_path}"
+            )
+            
+            try:
+                if os.path.exists(chunk_path):
+                    GFSLogger.log_transaction(
+                        self.transaction_logger,
+                        transaction_id,
+                        "PREPARE",
+                        f"Copying existing data from {chunk_path}"
+                    )
+                    with open(chunk_path, 'rb') as src, open(temp_path, 'wb') as dst:
+                        dst.write(src.read())
+                        dst.seek(message['offset'])
+                        dst.write(message['data'])
+                else:
+                    GFSLogger.log_transaction(
+                        self.transaction_logger,
+                        transaction_id,
+                        "PREPARE",
+                        "Creating new chunk file"
+                    )
+                    with open(temp_path, 'wb') as f:
+                        f.write(message['data'])
+                
+                GFSLogger.log_transaction(
+                    self.transaction_logger,
+                    transaction_id,
+                    "PREPARE",
+                    "Prepare phase completed successfully"
+                )
+                send_message(client_socket, {
+                    'status': 'ok',
+                    'message': 'prepared'
+                })
+                
+            except Exception as e:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise
+                
+        except Exception as e:
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "PREPARE",
+                f"Prepare phase failed: {str(e)}"
+            )
+            send_message(client_socket, {
+                'status': 'error',
+                'message': str(e)
+            })
+
+    def _handle_commit_append(self, client_socket: socket.socket, message: Dict):
+        """Handle commit phase of append operation."""
+        try:
+            chunk_id = message['chunk_id']
+            transaction_id = message['transaction_id']
+            
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "COMMIT",
+                f"Received commit request for chunk {chunk_id}"
+            )
+            
+            temp_path = os.path.join(self.data_dir, f"{chunk_id}.{transaction_id}.temp")
+            chunk_path = os.path.join(self.data_dir, chunk_id)
+            
+            if not os.path.exists(temp_path):
+                raise Exception("No prepared data found for commit")
+            
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "COMMIT",
+                f"Committing changes from {temp_path} to {chunk_path}"
+            )
+            os.replace(temp_path, chunk_path)
+            
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "COMMIT",
+                "Commit completed successfully"
+            )
+            send_message(client_socket, {
+                'status': 'ok',
+                'message': 'committed'
+            })
+            
+        except Exception as e:
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "COMMIT",
+                f"Commit failed: {str(e)}"
+            )
+            send_message(client_socket, {
+                'status': 'error',
+                'message': str(e)
+            })
+
+    def _handle_rollback_append(self, client_socket: socket.socket, message: Dict):
+        """Handle rollback of append operation."""
+        try:
+            chunk_id = message['chunk_id']
+            transaction_id = message['transaction_id']
+            
+            self.logger.info(f"Rolling back append for chunk {chunk_id}, transaction {transaction_id}")
+            
+            temp_path = os.path.join(self.data_dir, f"{chunk_id}.{transaction_id}.temp")
+            
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            
+            send_message(client_socket, {
+                'status': 'ok',
+                'message': 'rolled back'
+            })
+            self.logger.debug(f"Successfully rolled back append for transaction {transaction_id}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to rollback append: {e}", exc_info=True)
+            send_message(client_socket, {
+                'status': 'error',
+                'message': str(e)
+            })
+
+    def _handle_prepare_chunk(self, client_socket: socket.socket, message: Dict):
+        """Handle prepare phase for chunk storage."""
+        try:
+            chunk_id = message['chunk_id']
+            data = message['data']
+            transaction_id = message['transaction_id']
+            file_path = message['file_path']
+            
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "PREPARE",
+                f"Received prepare request for chunk {chunk_id} from primary"
+            )
+            
+            # Create temporary file
+            temp_path = os.path.join(self.data_dir, f"{chunk_id}.{transaction_id}.temp")
+            try:
+                with open(temp_path, 'wb') as f:
+                    f.write(data)
+                GFSLogger.log_transaction(
+                    self.transaction_logger,
+                    transaction_id,
+                    "PREPARE",
+                    f"✅ Successfully prepared chunk {chunk_id}"
+                )
+                send_message(client_socket, {
+                    'status': 'ok',
+                    'message': 'prepared'
+                })
+            except Exception as e:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise Exception(f"Failed to prepare chunk: {e}")
+                
+        except Exception as e:
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "PREPARE",
+                f"❌ Failed to prepare chunk: {e}"
+            )
+            send_message(client_socket, {
+                'status': 'error',
+                'message': str(e)
+            })
+
+    def _handle_commit_chunk(self, client_socket: socket.socket, message: Dict):
+        """Handle commit phase for chunk storage."""
+        try:
+            chunk_id = message['chunk_id']
+            transaction_id = message['transaction_id']
+            
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "COMMIT",
+                f"Received commit request for chunk {chunk_id}"
+            )
+            
+            temp_path = os.path.join(self.data_dir, f"{chunk_id}.{transaction_id}.temp")
+            chunk_path = os.path.join(self.data_dir, chunk_id)
+            
+            if not os.path.exists(temp_path):
+                raise Exception("No prepared data found for commit")
+            
+            # Atomic rename of temp file to final chunk file
+            os.replace(temp_path, chunk_path)
+            
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "COMMIT",
+                f"✅ Successfully committed chunk {chunk_id}"
+            )
+            send_message(client_socket, {
+                'status': 'ok',
+                'message': 'committed'
+            })
+            
+        except Exception as e:
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "COMMIT",
+                f"❌ Failed to commit chunk: {e}"
+            )
+            send_message(client_socket, {
+                'status': 'error',
+                'message': str(e)
+            })
+
+    def _handle_rollback_chunk(self, client_socket: socket.socket, message: Dict):
+        """Handle rollback for chunk storage."""
+        try:
+            chunk_id = message['chunk_id']
+            transaction_id = message['transaction_id']
+            
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "ROLLBACK",
+                f"Received rollback request for chunk {chunk_id}"
+            )
+            
+            temp_path = os.path.join(self.data_dir, f"{chunk_id}.{transaction_id}.temp")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+                GFSLogger.log_transaction(
+                    self.transaction_logger,
+                    transaction_id,
+                    "ROLLBACK",
+                    f"✅ Successfully rolled back chunk {chunk_id}"
+                )
+            
+            send_message(client_socket, {
+                'status': 'ok',
+                'message': 'rolled back'
+            })
+            
+        except Exception as e:
+            GFSLogger.log_transaction(
+                self.transaction_logger,
+                transaction_id,
+                "ROLLBACK",
+                f"❌ Failed to rollback chunk: {e}"
+            )
             send_message(client_socket, {
                 'status': 'error',
                 'message': str(e)
