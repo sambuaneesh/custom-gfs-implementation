@@ -1,6 +1,10 @@
 import streamlit as st
 import os
 import sys
+import networkx as nx
+import plotly.graph_objects as go
+import time
+from typing import Dict, Any
 
 # Add the project root directory to Python path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -8,25 +12,153 @@ sys.path.append(project_root)
 
 from src.client import GFSClient
 from src.logger import GFSLogger
+from src.utils import send_message, receive_message
 
 logger = GFSLogger.get_logger('streamlit_app')
+
+def create_network_graph(graph_data: Dict[str, Any]) -> go.Figure:
+    """Create a network graph visualization using plotly."""
+    # Create networkx graph
+    G = nx.Graph()
+    
+    # Add nodes
+    node_colors = []
+    node_symbols = []
+    node_sizes = []
+    node_texts = []
+    
+    for node in graph_data['nodes']:
+        G.add_node(node['id'], pos=node['location'])
+        
+        # Set node properties based on type
+        if node['type'] == 'chunk_server':
+            node_colors.append('red')
+            node_symbols.append('square')
+            node_sizes.append(20)
+            node_texts.append(f"Chunk Server: {node['id']}<br>Location: {node['location']}")
+        else:  # client
+            node_colors.append('blue')
+            node_symbols.append('circle')
+            node_sizes.append(15)
+            node_texts.append(f"Client: {node['id']}<br>Location: {node['location']}")
+    
+    # Add edges
+    edge_traces = []
+    for edge in graph_data['edges']:
+        source_pos = G.nodes[edge['source']]['pos']
+        target_pos = G.nodes[edge['target']]['pos']
+        
+        edge_trace = go.Scatter(
+            x=[source_pos[0], target_pos[0]],
+            y=[source_pos[1], target_pos[1]],
+            mode='lines',
+            line=dict(width=0.5, color='#888'),
+            hoverinfo='text',
+            text=f"Distance: {edge['distance']:.2f}",
+            showlegend=False
+        )
+        edge_traces.append(edge_trace)
+    
+    # Create node trace
+    node_trace = go.Scatter(
+        x=[G.nodes[node]['pos'][0] for node in G.nodes()],
+        y=[G.nodes[node]['pos'][1] for node in G.nodes()],
+        mode='markers+text',
+        hoverinfo='text',
+        text=node_texts,
+        marker=dict(
+            size=node_sizes,
+            color=node_colors,
+            symbol=node_symbols,
+            line=dict(width=2)
+        ),
+        showlegend=False
+    )
+    
+    # Create figure
+    fig = go.Figure(data=[*edge_traces, node_trace])
+    
+    # Update layout
+    fig.update_layout(
+        title='GFS Network Graph',
+        showlegend=False,
+        hovermode='closest',
+        margin=dict(b=20,l=5,r=5,t=40),
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        plot_bgcolor='white'
+    )
+    
+    return fig
 
 def main():
     logger.info("Starting GFS web interface")
     st.title("Google File System (GFS) Interface")
 
-    # Initialize client
+    # Initialize client with location coordinates from environment
+    client_id = os.environ.get('GFS_CLIENT_ID')
+    x = float(os.environ.get('GFS_CLIENT_X', 0.0))
+    y = float(os.environ.get('GFS_CLIENT_Y', 0.0))
+    
     logger.debug("Initializing GFS client")
-    client = GFSClient("configs/config.toml")
+    client = GFSClient("configs/config.toml", client_id=client_id, x=x, y=y)
+    
+    # Display client information
+    st.sidebar.markdown(f"""
+    **Client Information**
+    - ID: {client_id or 'Default'}
+    - Location: ({x}, {y})
+    """)
 
     # Sidebar for operations
     operation = st.sidebar.selectbox(
         "Select Operation",
-        ["Upload File", "Download File", "List Files", "Append to File"]
+        ["Upload File", "Download File", "List Files", "Append to File", "Network Graph"]
     )
     logger.debug(f"Selected operation: {operation}")
 
-    if operation == "Upload File":
+    # Add auto-refresh checkbox in sidebar
+    auto_refresh = st.sidebar.checkbox("Auto-refresh Network Graph", value=False)
+    
+    if operation == "Network Graph":
+        st.header("GFS Network Graph")
+        
+        try:
+            # Get graph data from master
+            with client._connect_to_master() as master_sock:
+                send_message(master_sock, {'command': 'get_graph_data'})
+                response = receive_message(master_sock)
+                
+                if response['status'] == 'ok':
+                    graph_data = response['graph_data']
+                    
+                    # Create and display graph
+                    fig = create_network_graph(graph_data)
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Display statistics
+                    st.subheader("Network Statistics")
+                    chunk_servers = sum(1 for node in graph_data['nodes'] if node['type'] == 'chunk_server')
+                    clients = sum(1 for node in graph_data['nodes'] if node['type'] == 'client')
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Active Chunk Servers", chunk_servers)
+                    with col2:
+                        st.metric("Connected Clients", clients)
+                    
+                    # Auto-refresh
+                    if auto_refresh:
+                        time.sleep(5)  # Refresh every 5 seconds
+                        st.experimental_rerun()
+                else:
+                    st.error(f"Failed to get graph data: {response.get('message')}")
+                    
+        except Exception as e:
+            st.error(f"Failed to connect to master server: {str(e)}")
+            logger.error("Failed to get graph data", exc_info=True)
+
+    elif operation == "Upload File":
         logger.debug("Rendering upload file interface")
         st.header("Upload File")
         uploaded_file = st.file_uploader("Choose a file")

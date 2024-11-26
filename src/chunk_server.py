@@ -12,7 +12,7 @@ import json
 import shutil
 
 class ChunkServer:
-    def __init__(self, config_path: str, server_id: str = None, space_limit_mb: int = 1024):
+    def __init__(self, config_path: str, server_id: str = None, space_limit_mb: int = 1024, x: float = 0, y: float = 0):
         self.logger = GFSLogger.get_logger('chunk_server')
         self.transaction_logger = GFSLogger.get_transaction_logger('chunk_server')
         self.logger.info(f"Initializing Chunk Server with config from {config_path}")
@@ -50,6 +50,9 @@ class ChunkServer:
         self.heartbeat_thread = threading.Thread(target=self._send_heartbeat)
         self.heartbeat_thread.daemon = True
         self.logger.debug("Created heartbeat thread")
+        
+        self.location = (x, y)  # Store coordinates
+        self.logger.info(f"Chunk server location set to ({x}, {y})")
         
         self._register_with_master()
 
@@ -111,7 +114,8 @@ class ChunkServer:
                 self.logger.debug("Connected to master server")
                 send_message(s, {
                     'command': 'register_chunk_server',
-                    'address': self.address
+                    'address': self.address,
+                    'location': self.location  # Add location info
                 })
             self.logger.info(f"Successfully registered with master at {self.master_host}:{self.master_port}")
         except Exception as e:
@@ -127,7 +131,8 @@ class ChunkServer:
                     s.connect((self.master_host, self.master_port))
                     send_message(s, {
                         'command': 'heartbeat',
-                        'address': self.address
+                        'address': self.address,
+                        'location': self.location  # Include location in heartbeat
                     })
                     self.logger.debug(f"Sent heartbeat to master")
             except Exception as e:

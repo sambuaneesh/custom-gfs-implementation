@@ -7,6 +7,85 @@ from .file_manager import FileManager
 from .utils import send_message, receive_message
 from .logger import GFSLogger
 import random
+import math
+from collections import defaultdict
+import networkx as nx
+import plotly.graph_objects as go
+
+class LocationGraph:
+    def __init__(self):
+        self.nodes = {}  # id -> (x, y) coordinates
+        self.distances = defaultdict(dict)  # id -> {other_id -> distance}
+        self.node_type = {}  # id -> "client" or "chunk_server"
+        self.lock = threading.Lock()
+
+    def add_node(self, node_id: str, location: tuple, node_type: str):
+        """Add a node to the graph."""
+        with self.lock:
+            self.nodes[node_id] = location
+            self.node_type[node_id] = node_type
+            self._update_distances(node_id)
+
+    def remove_node(self, node_id: str):
+        """Remove a node from the graph."""
+        with self.lock:
+            if node_id in self.nodes:
+                del self.nodes[node_id]
+                del self.node_type[node_id]
+                # Remove all distances involving this node
+                del self.distances[node_id]
+                for other_id in self.distances:
+                    self.distances[other_id].pop(node_id, None)
+
+    def _update_distances(self, node_id: str):
+        """Update distances for a node to all other nodes."""
+        x1, y1 = self.nodes[node_id]
+        for other_id, (x2, y2) in self.nodes.items():
+            if other_id != node_id:
+                distance = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+                self.distances[node_id][other_id] = distance
+                self.distances[other_id][node_id] = distance
+
+    def get_nearest_chunk_servers(self, client_id: str, k: int = 3) -> List[str]:
+        """Get k nearest chunk servers to a client."""
+        with self.lock:
+            if client_id not in self.nodes:
+                return []
+            
+            # Get all chunk servers and their distances to this client
+            chunk_servers = [
+                (server_id, self.distances[client_id][server_id])
+                for server_id in self.nodes
+                if self.node_type[server_id] == "chunk_server"
+            ]
+            
+            # Sort by distance and return top k
+            chunk_servers.sort(key=lambda x: x[1])
+            return [server_id for server_id, _ in chunk_servers[:k]]
+
+    def get_graph_data(self):
+        """Get graph data for visualization."""
+        with self.lock:
+            return {
+                'nodes': [
+                    {
+                        'id': node_id,
+                        'type': self.node_type[node_id],
+                        'location': self.nodes[node_id]
+                    }
+                    for node_id in self.nodes
+                ],
+                'edges': [
+                    {
+                        'source': source,
+                        'target': target,
+                        'distance': distance
+                    }
+                    for source, targets in self.distances.items()
+                    for target, distance in targets.items()
+                    if source < target  # Avoid duplicate edges
+                ]
+            }
 
 class MasterServer:
     def __init__(self, config_path: str):
@@ -45,6 +124,15 @@ class MasterServer:
         self.replication_thread.daemon = True
         self.replication_thread.start()
         self.logger.info("Started background replication thread")
+        
+        self.location_graph = LocationGraph()
+        self.clients = {}  # client_id -> last_heartbeat_time
+        self.client_lock = threading.Lock()
+        
+        # Start client heartbeat checker thread
+        self.client_heartbeat_thread = threading.Thread(target=self._check_client_heartbeats)
+        self.client_heartbeat_thread.daemon = True
+        self.client_heartbeat_thread.start()
 
     def _check_heartbeats(self):
         """Check for chunk server heartbeats and remove dead servers."""
@@ -59,6 +147,7 @@ class MasterServer:
                 for addr in dead_servers:
                     self.logger.warning(f"Chunk server {addr} is dead, removing...")
                     del self.chunk_servers[addr]
+                    self.location_graph.remove_node(addr)
                 
                 self.logger.debug(f"Active chunk servers: {list(self.chunk_servers.keys())}")
             time.sleep(self.config['chunk_server']['heartbeat_interval'])
@@ -79,7 +168,7 @@ class MasterServer:
                 if command == 'heartbeat':
                     self._handle_heartbeat(message['address'])
                 elif command == 'register_chunk_server':
-                    self._handle_register_chunk_server(message['address'])
+                    self._handle_register_chunk_server(message)
                 elif command == 'get_chunk_locations':
                     self._handle_get_chunk_locations(client_socket, message)
                 elif command == 'update_chunk_locations':
@@ -89,7 +178,7 @@ class MasterServer:
                 elif command == 'get_file_metadata':
                     self._handle_get_file_metadata(client_socket, message)
                 elif command == 'get_chunk_servers':
-                    self._handle_get_chunk_servers(client_socket)
+                    self._handle_get_chunk_servers(client_socket, message)
                 elif command == 'add_file':
                     self._handle_add_file(client_socket, message)
                 elif command == 'get_replica_locations':
@@ -100,6 +189,12 @@ class MasterServer:
                     self._handle_add_chunk(client_socket, message)
                 elif command == 'update_file_metadata':
                     self._handle_update_file_metadata(client_socket, message)
+                elif command == 'register_client':
+                    self._handle_register_client(client_socket, message)
+                elif command == 'client_heartbeat':
+                    self._handle_client_heartbeat(message)
+                elif command == 'get_graph_data':
+                    self._handle_get_graph_data(client_socket, message)
 
         except Exception as e:
             self.logger.error(f"Error handling client {address}: {e}", exc_info=True)
@@ -111,13 +206,48 @@ class MasterServer:
         """Handle heartbeat from chunk server."""
         with self.chunk_server_lock:
             self.chunk_servers[address] = time.time()
+            self.location_graph.add_node(address, self.location_graph.nodes[address], "chunk_server")
             self.logger.debug(f"Received heartbeat from chunk server {address}")
 
-    def _handle_register_chunk_server(self, address: str):
-        """Handle chunk server registration."""
+    def _handle_register_chunk_server(self, message: Dict):
+        """Handle chunk server registration with location."""
+        address = message['address']
+        location = message['location']
         with self.chunk_server_lock:
             self.chunk_servers[address] = time.time()
-            self.logger.info(f"Registered new chunk server at {address}")
+            self.location_graph.add_node(address, location, "chunk_server")
+            self.logger.info(f"Registered chunk server at {address} location {location}")
+
+    def _handle_register_client(self, client_socket: socket.socket, message: Dict):
+        """Handle client registration with location."""
+        client_id = message['client_id']
+        location = message['location']
+        with self.client_lock:
+            self.clients[client_id] = time.time()
+            self.location_graph.add_node(client_id, location, "client")
+            self.logger.info(f"Registered client {client_id} at location {location}")
+        send_message(client_socket, {'status': 'ok'})
+
+    def _handle_client_heartbeat(self, message: Dict):
+        """Handle client heartbeat."""
+        client_id = message['client_id']
+        with self.client_lock:
+            self.clients[client_id] = time.time()
+
+    def _check_client_heartbeats(self):
+        """Check for client heartbeats and remove dead clients."""
+        while True:
+            current_time = time.time()
+            with self.client_lock:
+                dead_clients = [
+                    client_id for client_id, last_beat in self.clients.items()
+                    if current_time - last_beat > 60  # Client timeout after 60 seconds
+                ]
+                for client_id in dead_clients:
+                    self.logger.warning(f"Client {client_id} is dead, removing...")
+                    del self.clients[client_id]
+                    self.location_graph.remove_node(client_id)
+            time.sleep(30)
 
     def _handle_get_chunk_locations(self, client_socket: socket.socket, message: Dict):
         """Handle request for chunk locations."""
@@ -164,15 +294,30 @@ class MasterServer:
             'metadata': metadata
         })
 
-    def _handle_get_chunk_servers(self, client_socket: socket.socket):
-        """Handle request for available chunk servers."""
-        with self.chunk_server_lock:
-            active_servers = list(self.chunk_servers.keys())
-            self.logger.debug(f"Returning active chunk servers: {active_servers}")
-            send_message(client_socket, {
-                'status': 'ok',
-                'servers': active_servers
-            })
+    def _handle_get_chunk_servers(self, client_socket: socket.socket, message: Dict):
+        """Handle request for available chunk servers, now considering location."""
+        client_id = message.get('client_id')
+        if client_id:
+            # Get nearest chunk servers for this client
+            with self.chunk_server_lock:
+                nearest_servers = self.location_graph.get_nearest_chunk_servers(client_id)
+                active_servers = [
+                    server for server in nearest_servers
+                    if server in self.chunk_servers
+                ]
+                self.logger.debug(f"Returning nearest active chunk servers for {client_id}: {active_servers}")
+                send_message(client_socket, {
+                    'status': 'ok',
+                    'servers': active_servers
+                })
+        else:
+            # Fallback to original behavior if no client_id provided
+            with self.chunk_server_lock:
+                active_servers = list(self.chunk_servers.keys())
+                send_message(client_socket, {
+                    'status': 'ok',
+                    'servers': active_servers
+                })
 
     def _handle_add_file(self, client_socket: socket.socket, message: Dict):
         """Handle adding a new file."""
@@ -432,6 +577,21 @@ class MasterServer:
 
         except Exception as e:
             self.logger.error(f"Failed to update file metadata: {e}")
+            send_message(client_socket, {
+                'status': 'error',
+                'message': str(e)
+            })
+
+    def _handle_get_graph_data(self, client_socket: socket.socket, message: Dict):
+        """Handle request for graph visualization data."""
+        try:
+            graph_data = self.location_graph.get_graph_data()
+            send_message(client_socket, {
+                'status': 'ok',
+                'graph_data': graph_data
+            })
+        except Exception as e:
+            self.logger.error(f"Failed to get graph data: {e}")
             send_message(client_socket, {
                 'status': 'error',
                 'message': str(e)

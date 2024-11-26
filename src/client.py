@@ -9,7 +9,7 @@ import random
 import time
 
 class GFSClient:
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, client_id: str = None, x: float = 0, y: float = 0):
         self.logger = GFSLogger.get_logger('client')
         self.transaction_logger = GFSLogger.get_transaction_logger('client')
         self.logger.info(f"Initializing GFS Client with config from {config_path}")
@@ -20,6 +20,43 @@ class GFSClient:
         self.chunk_size = self.config['client']['upload_chunk_size']
         self.logger.debug(f"Master server at {self.master_host}:{self.master_port}")
         self.logger.debug(f"Chunk size set to {self.chunk_size} bytes")
+        
+        self.location = (x, y)
+        self.client_id = client_id or f"client_{int(time.time())}"
+        self.logger.info(f"Client {self.client_id} location set to ({x}, {y})")
+        
+        # Register with master
+        self._register_with_master()
+
+    def _register_with_master(self):
+        """Register client with master server."""
+        try:
+            with self._connect_to_master() as master_sock:
+                send_message(master_sock, {
+                    'command': 'register_client',
+                    'client_id': self.client_id,
+                    'location': self.location
+                })
+                response = receive_message(master_sock)
+                if response['status'] != 'ok':
+                    raise Exception(f"Failed to register with master: {response.get('message')}")
+        except Exception as e:
+            self.logger.error(f"Failed to register with master: {e}")
+            raise
+
+    def _send_heartbeat(self):
+        """Send periodic heartbeats to master."""
+        while True:
+            try:
+                with self._connect_to_master() as master_sock:
+                    send_message(master_sock, {
+                        'command': 'client_heartbeat',
+                        'client_id': self.client_id,
+                        'location': self.location
+                    })
+            except Exception as e:
+                self.logger.error(f"Failed to send heartbeat: {e}")
+            time.sleep(30)  # Send client heartbeat every 30 seconds
 
     def _connect_to_master(self) -> socket.socket:
         """Connect to the master server."""

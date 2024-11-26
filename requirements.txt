@@ -2,3 +2,5 @@ streamlit==1.22.0
 toml==0.10.2
 setuptools
 colorama==0.4.6
+networkx
+plotly
