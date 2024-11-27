@@ -2,7 +2,7 @@ import socket
 import threading
 import time
 import toml
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Tuple
 from .file_manager import FileManager
 from .utils import send_message, receive_message
 from .logger import GFSLogger
@@ -11,6 +11,14 @@ import math
 from collections import defaultdict
 import networkx as nx
 import plotly.graph_objects as go
+from queue import PriorityQueue
+from dataclasses import dataclass
+
+@dataclass
+class ServerDistance:
+    server_id: str
+    distance: float
+    space_available: int
 
 class LocationGraph:
     def __init__(self):
@@ -102,6 +110,37 @@ class LocationGraph:
                 'available': total - used
             }
 
+class ClientServerPriority:
+    def __init__(self):
+        self.client_priorities: Dict[str, List[ServerDistance]] = {}
+        self.lock = threading.Lock()
+
+    def update_priorities(self, client_id: str, client_location: Tuple[float, float], 
+                        servers: Dict[str, Tuple[float, float, int]]):
+        """Update priority list for a client based on distances to servers."""
+        with self.lock:
+            distances = []
+            for server_id, (x, y, space) in servers.items():
+                dx = client_location[0] - x
+                dy = client_location[1] - y
+                distance = math.sqrt(dx*dx + dy*dy)
+                distances.append(ServerDistance(server_id, distance, space))
+            
+            # Sort by distance
+            self.client_priorities[client_id] = sorted(distances, key=lambda x: x.distance)
+
+    def get_priority_servers(self, client_id: str, exclude_servers: Set[str] = None) -> List[str]:
+        """Get ordered list of servers by priority for a client."""
+        with self.lock:
+            if client_id not in self.client_priorities:
+                return []
+            
+            if exclude_servers is None:
+                exclude_servers = set()
+                
+            return [s.server_id for s in self.client_priorities[client_id] 
+                   if s.server_id not in exclude_servers]
+
 class MasterServer:
     def __init__(self, config_path: str):
         self.logger = GFSLogger.get_logger('master')
@@ -148,6 +187,8 @@ class MasterServer:
         self.client_heartbeat_thread = threading.Thread(target=self._check_client_heartbeats)
         self.client_heartbeat_thread.daemon = True
         self.client_heartbeat_thread.start()
+        
+        self.client_priorities = ClientServerPriority()
 
     def _check_heartbeats(self):
         """Check for chunk server heartbeats and remove dead servers."""
@@ -220,14 +261,33 @@ class MasterServer:
     def _handle_heartbeat(self, message: Dict):
         """Handle heartbeat from chunk server."""
         address = message['address']
+        location = message['location']
+        space_info = message.get('space_info', {})
+        
         with self.chunk_server_lock:
             self.chunk_servers[address] = time.time()
-            self.location_graph.add_node(address, message['location'], "chunk_server")
-            if 'space_info' in message:
+            self.location_graph.add_node(address, location, "chunk_server")
+            if space_info:
                 self.location_graph.update_space_info(address, 
-                    message['space_info']['total'],
-                    message['space_info']['used']
+                    space_info['total'],
+                    space_info['used']
                 )
+            
+            # Update priorities for all clients
+            server_info = {}
+            for addr, _ in self.chunk_servers.items():
+                node = self.location_graph.nodes.get(addr)
+                if node:
+                    space = self.location_graph.space_info.get(addr, {}).get('available', 0)
+                    server_info[addr] = (*node, space)
+            
+            for client_id in self.clients:
+                if client_id in self.location_graph.nodes:
+                    self.client_priorities.update_priorities(
+                        client_id,
+                        self.location_graph.nodes[client_id],
+                        server_info
+                    )
 
     def _handle_register_chunk_server(self, message: Dict):
         """Handle chunk server registration with location."""
@@ -357,21 +417,30 @@ class MasterServer:
             })
 
     def _handle_get_replica_locations(self, client_socket: socket.socket, message: Dict):
-        """Handle request for replica locations."""
+        """Handle request for replica locations with priority."""
+        client_id = message.get('client_id')
+        excluding = message.get('excluding', set())
+        
+        if isinstance(excluding, str):
+            excluding = {excluding}
+        
         with self.chunk_server_lock:
-            available_servers = list(self.chunk_servers.keys())
-            # Remove the requesting server from available servers
-            if message['excluding'] in available_servers:
-                available_servers.remove(message['excluding'])
+            if client_id:
+                # Get priority-ordered servers for this client
+                servers = self.client_priorities.get_priority_servers(client_id, excluding)
+            else:
+                # Fallback to random selection
+                servers = [s for s in self.chunk_servers.keys() if s not in excluding]
             
             # Select servers for replication
             num_replicas = min(
-                self.config['master']['replication_factor'] - 1,  # -1 because one copy is already on primary
-                len(available_servers)
+                self.config['master']['replication_factor'] - 1,
+                len(servers)
             )
-            selected_servers = random.sample(available_servers, num_replicas)
             
-            self.logger.debug(f"Selected replica servers: {selected_servers}")
+            # Take the first num_replicas servers from the priority list
+            selected_servers = servers[:num_replicas]
+            
             send_message(client_socket, {
                 'status': 'ok',
                 'locations': selected_servers

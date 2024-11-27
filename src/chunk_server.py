@@ -269,11 +269,12 @@ class ChunkServer:
             # If this is the primary server (not part of replication chain)
             if 'replica_servers' not in message:
                 # Get replica locations from master
-                available_replicas = []
+                available_replicas = []  # Initialize the list here
                 with self._connect_to_master() as master_sock:
                     send_message(master_sock, {
                         'command': 'get_replica_locations',
-                        'excluding': self.address
+                        'excluding': self.address,
+                        'client_id': message.get('client_id')
                     })
                     response = receive_message(master_sock)
                     potential_replicas = response['locations']
@@ -338,7 +339,7 @@ class ChunkServer:
                             'chunk_id': chunk_id,
                             'chunk_locations': successful_servers,
                             'chunk_size': chunk_size,
-                            'pending_replication': True  # Indicate that replication might be needed
+                            'pending_replication': True
                         })
 
                     GFSLogger.log_transaction(

@@ -109,6 +109,14 @@ def create_network_graph(graph_data: Dict[str, Any], show_space_usage: bool = Fa
             )
             edge_traces.append(edge_trace)
     
+    # Add priority information to hover text for chunk servers
+    if 'server_priorities' in graph_data:
+        priorities = graph_data['server_priorities']
+        for node in chunk_server_nodes:
+            if node['id'] in priorities:
+                priority_info = f"<br>Priority: {priorities[node['id']]}"
+                node_texts[-1] += priority_info
+    
     # Create node trace
     node_trace = go.Scatter(
         x=[G.nodes[node]['pos'][0] for node in G.nodes()],

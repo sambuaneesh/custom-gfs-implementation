@@ -97,22 +97,19 @@ class GFSClient:
                         'data': chunk.data,
                         'file_path': chunk.file_path,
                         'chunk_index': chunk.chunk_index,
-                        'chunk_id': chunk.chunk_id
+                        'chunk_id': chunk.chunk_id,
+                        'client_id': self.client_id
                     })
                     response = receive_message(chunk_sock)
                     
                     if response['status'] == 'ok':
-                        self.logger.info(f"Stored chunk with {response.get('replicas', 0)} replicas")
                         return server
                     elif response.get('message') == 'insufficient_space':
-                        self.logger.warning(f"Server {server} has insufficient space, trying next server")
                         continue
                     else:
-                        self.logger.error(f"Failed to store chunk: {response.get('message')}")
                         continue
                     
             except Exception as e:
-                self.logger.error(f"Failed to store chunk on {server}: {e}")
                 continue
                 
         return None

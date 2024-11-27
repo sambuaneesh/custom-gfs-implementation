@@ -4,6 +4,7 @@ clean:
 	rm -rf data
 	rm -rf logs
 	rm -rf src/__pycache__
+	rm -rf temp_*
 
 master:
 	python run_master.py
