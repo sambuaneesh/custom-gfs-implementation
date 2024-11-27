@@ -237,6 +237,50 @@ def create_file_explorer(client: GFSClient, current_path: str = "/") -> None:
     # Show current path
     st.markdown(f"**Current Path:** `{current_path}`")
     
+    # Add directory creation and file upload in current directory
+    with st.expander("➕ Add New Content", expanded=False):
+        col1, col2 = st.columns(2)
+        
+        # Directory creation
+        with col1:
+            st.markdown("### Create Directory")
+            new_dir_name = st.text_input("Directory Name", key="new_dir_name")
+            if st.button("Create Directory"):
+                if new_dir_name:
+                    new_dir_path = f"{current_path.rstrip('/')}/{new_dir_name}"
+                    # Create an empty file to mark directory existence
+                    try:
+                        client.upload_file_from_bytes(b"", f"{new_dir_path}/.gfs_dir")
+                        st.success(f"Created directory: {new_dir_name}")
+                        st.experimental_rerun()
+                    except Exception as e:
+                        st.error(f"Failed to create directory: {str(e)}")
+        
+        # File upload in current directory
+        with col2:
+            st.markdown("### Upload File")
+            uploaded_file = st.file_uploader("Choose a file", key=f"uploader_{current_path}")
+            if uploaded_file:
+                file_path = f"{current_path.rstrip('/')}/{uploaded_file.name}"
+                if st.button("Upload Here"):
+                    try:
+                        # Save uploaded file temporarily
+                        temp_path = f"temp_{uploaded_file.name}"
+                        with open(temp_path, "wb") as f:
+                            f.write(uploaded_file.getbuffer())
+
+                        # Upload to GFS
+                        client.upload_file(temp_path, file_path)
+                        os.remove(temp_path)
+                        st.success("File uploaded successfully!")
+                        st.experimental_rerun()
+                    except Exception as e:
+                        st.error(f"Upload failed: {str(e)}")
+                        logger.error(f"Upload failed: {e}", exc_info=True)
+                    finally:
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+    
     # Get current directory content
     current_dir = dir_structure
     for part in path_parts:
@@ -255,8 +299,8 @@ def create_file_explorer(client: GFSClient, current_path: str = "/") -> None:
                     st.session_state.current_path = new_path
                     st.experimental_rerun()
     
-    # Display files
-    files = current_dir.get('files', [])
+    # Display files (excluding .gfs_dir markers)
+    files = [f for f in current_dir.get('files', []) if not f.endswith('.gfs_dir')]
     if files:
         st.markdown("### 📄 Files")
         for file_path in sorted(files):
