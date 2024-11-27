@@ -186,6 +186,123 @@ def create_network_graph(graph_data: Dict[str, Any], show_space_usage: bool = Fa
     
     return fig
 
+def is_text_file(filename: str) -> bool:
+    """Check if a file is likely to be a text file based on extension."""
+    text_extensions = {
+        '.txt', '.log', '.csv', '.md', '.json', '.xml', '.yaml', '.yml',
+        '.py', '.js', '.html', '.css', '.cpp', '.c', '.h', '.java',
+        '.sh', '.bash', '.conf', '.ini', '.toml', '.cfg'
+    }
+    return os.path.splitext(filename)[1].lower() in text_extensions
+
+def create_file_explorer(client: GFSClient, current_path: str = "/") -> None:
+    """Create a file explorer interface."""
+    st.header("File Explorer")
+    
+    # Get all files from GFS
+    all_files = client.list_files()
+    
+    # Create directory structure
+    dir_structure = {}
+    for file_path in all_files:
+        parts = file_path.strip('/').split('/')
+        current_dict = dir_structure
+        for i, part in enumerate(parts):
+            if i == len(parts) - 1:  # File
+                if 'files' not in current_dict:
+                    current_dict['files'] = []
+                current_dict['files'].append(file_path)
+            else:  # Directory
+                if part not in current_dict:
+                    current_dict[part] = {}
+                current_dict = current_dict[part]
+    
+    # Navigation bar
+    path_parts = current_path.strip('/').split('/')
+    if current_path != "/":
+        if st.button("📁 ..", key="back"):
+            # Go up one directory
+            new_path = "/".join(path_parts[:-1])
+            st.session_state.current_path = f"/{new_path}" if new_path else "/"
+            st.experimental_rerun()
+    
+    # Show current path
+    st.markdown(f"**Current Path:** `{current_path}`")
+    
+    # Get current directory content
+    current_dir = dir_structure
+    for part in path_parts:
+        if part:
+            current_dir = current_dir.get(part, {})
+    
+    # Display directories
+    dirs = [k for k in current_dir.keys() if k != 'files']
+    if dirs:
+        st.markdown("### 📁 Directories")
+        cols = st.columns(3)
+        for i, dir_name in enumerate(sorted(dirs)):
+            with cols[i % 3]:
+                if st.button(f"📁 {dir_name}", key=f"dir_{dir_name}"):
+                    new_path = f"{current_path.rstrip('/')}/{dir_name}"
+                    st.session_state.current_path = new_path
+                    st.experimental_rerun()
+    
+    # Display files
+    files = current_dir.get('files', [])
+    if files:
+        st.markdown("### 📄 Files")
+        for file_path in sorted(files):
+            filename = os.path.basename(file_path)
+            
+            # Create expandable section for each file
+            with st.expander(f"📄 {filename}"):
+                col1, col2 = st.columns([1, 1])
+                
+                with col1:
+                    if st.button("⬇️ Download", key=f"download_{file_path}"):
+                        try:
+                            # Download file
+                            local_path = f"downloaded_{filename}"
+                            client.download_file(file_path, local_path)
+                            
+                            # Provide download link
+                            with open(local_path, "rb") as f:
+                                st.download_button(
+                                    label="Click to Save",
+                                    data=f.read(),
+                                    file_name=filename,
+                                    key=f"save_{file_path}"
+                                )
+                            os.remove(local_path)
+                        except Exception as e:
+                            st.error(f"Download failed: {str(e)}")
+                            logger.error(f"Download failed: {e}", exc_info=True)
+                
+                # Add preview button for text files
+                if is_text_file(filename):
+                    with col2:
+                        if st.button("👁️ Preview", key=f"preview_{file_path}"):
+                            try:
+                                # Download file temporarily
+                                local_path = f"temp_preview_{filename}"
+                                client.download_file(file_path, local_path)
+                                
+                                # Read and display content
+                                with open(local_path, 'r', encoding='utf-8') as f:
+                                    content = f.read()
+                                    
+                                # Display file content in a code block with syntax highlighting
+                                extension = os.path.splitext(filename)[1][1:]  # Remove the dot
+                                st.code(content, language=extension if extension else None)
+                                
+                                # Cleanup
+                                os.remove(local_path)
+                            except UnicodeDecodeError:
+                                st.error("Unable to preview: File contains binary content")
+                            except Exception as e:
+                                st.error(f"Preview failed: {str(e)}")
+                                logger.error(f"Preview failed: {e}", exc_info=True)
+
 def main():
     logger.info("Starting GFS web interface")
     st.title("Google File System (GFS) Interface")
@@ -205,17 +322,24 @@ def main():
     - Location: ({x}, {y})
     """)
 
+    # Initialize session state for current path if not exists
+    if 'current_path' not in st.session_state:
+        st.session_state.current_path = "/"
+
     # Sidebar for operations
     operation = st.sidebar.selectbox(
         "Select Operation",
-        ["Upload File", "Download File", "List Files", "Append to File", "Network Graph"]
+        ["File Explorer", "Upload File", "Append to File", "Network Graph"]
     )
     logger.debug(f"Selected operation: {operation}")
 
     # Add auto-refresh checkbox in sidebar
     auto_refresh = st.sidebar.checkbox("Auto-refresh Network Graph", value=False)
     
-    if operation == "Network Graph":
+    if operation == "File Explorer":
+        create_file_explorer(client, st.session_state.current_path)
+        
+    elif operation == "Network Graph":
         st.header("GFS Network Graph")
         
         # Add toggle for space usage visualization
@@ -267,10 +391,13 @@ def main():
             logger.error("Failed to get graph data", exc_info=True)
 
     elif operation == "Upload File":
-        logger.debug("Rendering upload file interface")
         st.header("Upload File")
         uploaded_file = st.file_uploader("Choose a file")
-        gfs_path = st.text_input("GFS Path (e.g., /folder/file.txt)")
+        
+        # Use current path from file explorer
+        current_path = st.session_state.current_path
+        gfs_path = st.text_input("GFS Path", 
+                                value=f"{current_path.rstrip('/')}/")
 
         if uploaded_file and gfs_path and st.button("Upload"):
             logger.info(f"Starting upload of {uploaded_file.name} to {gfs_path}")
@@ -305,46 +432,6 @@ def main():
             except Exception as e:
                 logger.error(f"Upload failed: {e}", exc_info=True)
                 st.error(f"Upload failed: {str(e)}")
-
-    elif operation == "Download File":
-        logger.debug("Rendering download file interface")
-        st.header("Download File")
-        files = client.list_files()
-        selected_file = st.selectbox("Select File to Download", files if files else ["No files available"])
-
-        if selected_file and selected_file != "No files available" and st.button("Download"):
-            logger.info(f"Starting download of {selected_file}")
-            try:
-                # Download file
-                local_path = f"downloaded_{os.path.basename(selected_file)}"
-                logger.debug(f"Downloading to temporary path: {local_path}")
-                client.download_file(selected_file, local_path)
-
-                # Provide download link
-                logger.debug("Creating download button")
-                with open(local_path, "rb") as f:
-                    st.download_button(
-                        label="Click to Download",
-                        data=f.read(),
-                        file_name=os.path.basename(selected_file)
-                    )
-                os.remove(local_path)
-                logger.info(f"Successfully processed download for {selected_file}")
-            except Exception as e:
-                logger.error(f"Download failed: {e}", exc_info=True)
-                st.error(f"Download failed: {str(e)}")
-
-    elif operation == "List Files":
-        logger.debug("Rendering file list interface")
-        st.header("Files in GFS")
-        files = client.list_files()
-        if files:
-            logger.info(f"Found {len(files)} files in GFS")
-            for file in files:
-                st.text(file)
-        else:
-            logger.info("No files found in GFS")
-            st.info("No files found in GFS")
 
     elif operation == "Append to File":
         logger.debug("Rendering append interface")
