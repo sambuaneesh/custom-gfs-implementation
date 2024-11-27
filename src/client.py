@@ -547,7 +547,7 @@ class GFSClient:
                     )
             return False
 
-    def upload_file_from_bytes(self, data: bytes, gfs_path: str):
+    def upload_file_from_bytes(self, data: bytes, gfs_path: str, chunk_index: int = 0):
         """Upload bytes directly as a file to GFS."""
         self.logger.info(f"Starting upload of bytes to GFS path {gfs_path}")
         
@@ -561,8 +561,7 @@ class GFSClient:
             raise Exception(error_msg)
         
         # Create a single chunk for the data
-        chunk = Chunk(data, gfs_path, 0)
-        chunk_ids = [chunk.chunk_id]
+        chunk = Chunk(data, gfs_path, chunk_index)
         
         # Store chunk
         success_server = self._store_chunk_with_fallback(chunk, available_servers)

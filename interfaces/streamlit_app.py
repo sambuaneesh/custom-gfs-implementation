@@ -490,7 +490,7 @@ def main():
         st.header("Append to File")
         
         # Get list of files
-        files = client.list_files()
+        files = [f for f in client.list_files() if not f.endswith('.gfs_dir')]
         if not files:
             st.warning("No files available in GFS")
             return
