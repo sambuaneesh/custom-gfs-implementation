@@ -16,7 +16,7 @@ from src.utils import send_message, receive_message
 
 logger = GFSLogger.get_logger('streamlit_app')
 
-def create_network_graph(graph_data: Dict[str, Any], show_space_usage: bool = False) -> go.Figure:
+def create_network_graph(graph_data: Dict[str, Any], client_id: str, show_space_usage: bool = False) -> go.Figure:
     """Create a network graph visualization using plotly."""
     # Create networkx graph
     G = nx.Graph()
@@ -110,12 +110,19 @@ def create_network_graph(graph_data: Dict[str, Any], show_space_usage: bool = Fa
             edge_traces.append(edge_trace)
     
     # Add priority information to hover text for chunk servers
-    if 'server_priorities' in graph_data:
-        priorities = graph_data['server_priorities']
-        for node in chunk_server_nodes:
-            if node['id'] in priorities:
-                priority_info = f"<br>Priority: {priorities[node['id']]}"
-                node_texts[-1] += priority_info
+    if 'client_priorities' in graph_data:
+        priorities = graph_data['client_priorities'].get(client_id, [])
+        # Create a mapping of server_id to priority order
+        priority_map = {server_id: f"Priority {idx+1}" 
+                       for idx, server_id in enumerate(priorities)}
+        
+        # Update hover text for chunk servers to include priority
+        for i, node in enumerate(chunk_server_nodes):
+            if node['id'] in priority_map:
+                priority_info = f"<br><b>{priority_map[node['id']]}</b>"
+                node_texts[i] += priority_info
+            else:
+                node_texts[i] += "<br>No priority assigned"
     
     # Create node trace
     node_trace = go.Scatter(
@@ -400,22 +407,25 @@ def main():
         try:
             # Get graph data from master
             with client._connect_to_master() as master_sock:
-                send_message(master_sock, {'command': 'get_graph_data'})
+                send_message(master_sock, {
+                    'command': 'get_graph_data',
+                    'client_id': client_id  # Pass client_id to get priorities
+                })
                 response = receive_message(master_sock)
                 
                 if response['status'] == 'ok':
                     graph_data = response['graph_data']
                     
                     # Create and display graph with space usage toggle
-                    fig = create_network_graph(graph_data, show_space_usage)
+                    fig = create_network_graph(graph_data, client_id, show_space_usage)
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # Display statistics
+                    # Display statistics and priorities
                     st.markdown("### Network Statistics")
                     chunk_servers = sum(1 for node in graph_data['nodes'] if node['type'] == 'chunk_server')
                     clients = sum(1 for node in graph_data['nodes'] if node['type'] == 'client')
                     
-                    col1, col2 = st.columns(2)
+                    col1, col2, col3 = st.columns(3)
                     with col1:
                         st.metric(
                             "Active Chunk Servers",
@@ -430,6 +440,14 @@ def main():
                             delta=None,
                             delta_color="normal"
                         )
+                    
+                    # Display priority list
+                    if 'client_priorities' in graph_data:
+                        priorities = graph_data['client_priorities'].get(client_id, [])
+                        with col3:
+                            st.markdown("### Server Priorities")
+                            for idx, server_id in enumerate(priorities):
+                                st.text(f"{idx+1}. {server_id}")
                     
                     # Auto-refresh
                     if auto_refresh:

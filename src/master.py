@@ -75,7 +75,7 @@ class LocationGraph:
     def get_graph_data(self):
         """Get graph data for visualization."""
         with self.lock:
-            return {
+            graph_data = {
                 'nodes': [
                     {
                         'id': node_id,
@@ -100,6 +100,7 @@ class LocationGraph:
                     if self.node_type[node_id] == "client"
                 ]
             }
+            return graph_data
 
     def update_space_info(self, node_id: str, total: int, used: int):
         """Update space information for a node."""
@@ -674,7 +675,16 @@ class MasterServer:
     def _handle_get_graph_data(self, client_socket: socket.socket, message: Dict):
         """Handle request for graph visualization data."""
         try:
+            client_id = message.get('client_id')
             graph_data = self.location_graph.get_graph_data()
+            
+            # Add client-specific priority information
+            if client_id:
+                # Get priorities from MasterServer's client_priorities
+                graph_data['client_priorities'] = {
+                    client_id: self.client_priorities.get_priority_servers(client_id)
+                }
+            
             send_message(client_socket, {
                 'status': 'ok',
                 'graph_data': graph_data
