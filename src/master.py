@@ -84,6 +84,10 @@ class LocationGraph:
                     for source, targets in self.distances.items()
                     for target, distance in targets.items()
                     if source < target  # Avoid duplicate edges
+                ],
+                'active_clients': [
+                    node_id for node_id in self.nodes
+                    if self.node_type[node_id] == "client"
                 ]
             }
 

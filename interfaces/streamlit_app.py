@@ -26,38 +26,67 @@ def create_network_graph(graph_data: Dict[str, Any]) -> go.Figure:
     node_symbols = []
     node_sizes = []
     node_texts = []
+    node_labels = []
     
-    for node in graph_data['nodes']:
+    # First add chunk servers
+    chunk_server_nodes = [
+        node for node in graph_data['nodes'] 
+        if node['type'] == 'chunk_server'
+    ]
+    for node in chunk_server_nodes:
         G.add_node(node['id'], pos=node['location'])
-        
-        # Set node properties based on type
-        if node['type'] == 'chunk_server':
-            node_colors.append('red')
-            node_symbols.append('square')
-            node_sizes.append(20)
-            node_texts.append(f"Chunk Server: {node['id']}<br>Location: {node['location']}")
-        else:  # client
-            node_colors.append('blue')
-            node_symbols.append('circle')
-            node_sizes.append(15)
-            node_texts.append(f"Client: {node['id']}<br>Location: {node['location']}")
+        node_colors.append('#FF4B4B')  # Bright red
+        node_symbols.append('square')
+        node_sizes.append(30)
+        node_texts.append(f"<b>Address: {node['id']}</b><br>Location: {node['location']}")
+        node_labels.append('')
+
+    # Then add active clients (don't add edges for clients)
+    client_nodes = [
+        node for node in graph_data['nodes'] 
+        if node['type'] == 'client' and node['id'] in graph_data.get('active_clients', [])
+    ]
+    for node in client_nodes:
+        G.add_node(node['id'], pos=node['location'])
+        node_colors.append('#4B8BFF')  # Bright blue
+        node_symbols.append('circle')
+        node_sizes.append(25)
+        node_texts.append(f"<b>Client: {node['id']}</b><br>Location: {node['location']}")
+        node_labels.append('')
     
-    # Add edges
+    # Add edges only between chunk servers
     edge_traces = []
     for edge in graph_data['edges']:
-        source_pos = G.nodes[edge['source']]['pos']
-        target_pos = G.nodes[edge['target']]['pos']
-        
-        edge_trace = go.Scatter(
-            x=[source_pos[0], target_pos[0]],
-            y=[source_pos[1], target_pos[1]],
-            mode='lines',
-            line=dict(width=0.5, color='#888'),
-            hoverinfo='text',
-            text=f"Distance: {edge['distance']:.2f}",
-            showlegend=False
-        )
-        edge_traces.append(edge_trace)
+        # Only create edges if both nodes are chunk servers
+        if (edge['source'] in [n['id'] for n in chunk_server_nodes] and 
+            edge['target'] in [n['id'] for n in chunk_server_nodes]):
+            source_pos = G.nodes[edge['source']]['pos']
+            target_pos = G.nodes[edge['target']]['pos']
+            
+            # Calculate curve parameters
+            mid_x = (source_pos[0] + target_pos[0]) / 2
+            mid_y = (source_pos[1] + target_pos[1]) / 2
+            control_x = mid_x + (target_pos[1] - source_pos[1]) * 0.1
+            control_y = mid_y - (target_pos[0] - source_pos[0]) * 0.1
+            
+            # Create curved path
+            path_x = [source_pos[0], control_x, target_pos[0]]
+            path_y = [source_pos[1], control_y, target_pos[1]]
+            
+            edge_trace = go.Scatter(
+                x=path_x,
+                y=path_y,
+                mode='lines',
+                line=dict(
+                    width=1,
+                    color='rgba(150,150,150,0.4)',
+                    shape='spline'
+                ),
+                hoverinfo='text',
+                text=f"Distance: {edge['distance']:.2f} units",
+                showlegend=False
+            )
+            edge_traces.append(edge_trace)
     
     # Create node trace
     node_trace = go.Scatter(
@@ -66,11 +95,18 @@ def create_network_graph(graph_data: Dict[str, Any]) -> go.Figure:
         mode='markers+text',
         hoverinfo='text',
         text=node_texts,
+        textposition="top center",
+        textfont=dict(
+            family="Arial",
+            size=12,
+            color='#2E2E2E'
+        ),
         marker=dict(
             size=node_sizes,
             color=node_colors,
             symbol=node_symbols,
-            line=dict(width=2)
+            line=dict(width=2, color='#FFFFFF'),
+            opacity=0.9
         ),
         showlegend=False
     )
@@ -78,16 +114,47 @@ def create_network_graph(graph_data: Dict[str, Any]) -> go.Figure:
     # Create figure
     fig = go.Figure(data=[*edge_traces, node_trace])
     
-    # Update layout
+    # Update layout with a more professional look
     fig.update_layout(
-        title='GFS Network Graph',
+        # title=dict(
+        #     text='GFS Network Graph',
+        #     font=dict(size=24, color='#2E2E2E', family='Arial Bold'),
+        #     x=0.5,
+        #     y=0.95
+        # ),
         showlegend=False,
         hovermode='closest',
-        margin=dict(b=20,l=5,r=5,t=40),
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        plot_bgcolor='white'
+        margin=dict(b=20, l=5, r=5, t=40),
+        xaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            showticklabels=False,
+            showline=False
+        ),
+        yaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            showticklabels=False,
+            showline=False
+        ),
+        plot_bgcolor='#FFFFFF',  # White background
+        paper_bgcolor='#FFFFFF',
+        annotations=[
+            dict(
+                text="",
+                showarrow=False,
+                x=0.5,
+                y=1.05,
+                xref="paper",
+                yref="paper",
+                font=dict(size=14, color='#2E2E2E')
+            )
+        ]
     )
+    
+    # Add a subtle grid in the background
+    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.1)')
+    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.1)')
     
     return fig
 
@@ -136,20 +203,38 @@ def main():
                     fig = create_network_graph(graph_data)
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # Display statistics
-                    st.subheader("Network Statistics")
+                    # Display statistics in a more appealing way
+                    st.markdown("### Network Statistics")
                     chunk_servers = sum(1 for node in graph_data['nodes'] if node['type'] == 'chunk_server')
                     clients = sum(1 for node in graph_data['nodes'] if node['type'] == 'client')
                     
-                    col1, col2 = st.columns(2)
+                    col1, col2, col3 = st.columns([1,1,1])
                     with col1:
-                        st.metric("Active Chunk Servers", chunk_servers)
+                        st.metric(
+                            "Active Chunk Servers",
+                            chunk_servers,
+                            delta=None,
+                            delta_color="normal"
+                        )
                     with col2:
-                        st.metric("Connected Clients", clients)
+                        st.metric(
+                            "Connected Clients",
+                            clients,
+                            delta=None,
+                            delta_color="normal"
+                        )
+                    # with col3:
+                    #     total_connections = len(graph_data['edges'])
+                    #     st.metric(
+                    #         "Total Connections",
+                    #         total_connections,
+                    #         delta=None,
+                    #         delta_color="normal"
+                    #     )
                     
                     # Auto-refresh
                     if auto_refresh:
-                        time.sleep(5)  # Refresh every 5 seconds
+                        time.sleep(5)
                         st.experimental_rerun()
                 else:
                     st.error(f"Failed to get graph data: {response.get('message')}")
