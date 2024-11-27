@@ -113,13 +113,16 @@ def create_network_graph(graph_data: Dict[str, Any], client_id: str, show_space_
     if 'client_priorities' in graph_data:
         priorities = graph_data['client_priorities'].get(client_id, [])
         # Create a mapping of server_id to priority order
-        priority_map = {server_id: f"Priority {idx+1}" 
-                       for idx, server_id in enumerate(priorities)}
+        priority_map = {server_id: idx+1 for idx, server_id in enumerate(priorities)}
         
         # Update hover text for chunk servers to include priority
         for i, node in enumerate(chunk_server_nodes):
             if node['id'] in priority_map:
-                priority_info = f"<br><b>{priority_map[node['id']]}</b>"
+                space_info = node['space_info']
+                used_percent = (space_info['used'] / space_info['total']) * 100 if space_info else 0
+                priority_info = f"""<br><b>Priority: {priority_map[node['id']]}</b>
+                                  <br>Space Used: {used_percent:.1f}%
+                                  <br>Available: {space_info['available']/(1024*1024):.1f} MB"""
                 node_texts[i] += priority_info
             else:
                 node_texts[i] += "<br>No priority assigned"

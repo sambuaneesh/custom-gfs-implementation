@@ -115,20 +115,54 @@ class ClientServerPriority:
     def __init__(self):
         self.client_priorities: Dict[str, List[ServerDistance]] = {}
         self.lock = threading.Lock()
+        # Weights for the heuristic
+        self.DISTANCE_WEIGHT = 0.6  # 60% weight for distance
+        self.SPACE_WEIGHT = 0.4    # 40% weight for available space
+
+    def _calculate_server_score(self, distance: float, space_available: int, total_space: int) -> float:
+        """Calculate server score based on distance and available space.
+        
+        Returns a score where lower is better.
+        Distance is normalized by the maximum possible distance in the coordinate space.
+        Space is considered as a percentage used, where fuller servers get higher (worse) scores.
+        """
+        # Normalize distance (assuming max coordinate is 100)
+        MAX_DISTANCE = math.sqrt(2 * 100 * 100)  # max possible distance in coordinate space
+        normalized_distance = distance / MAX_DISTANCE
+        
+        # Calculate space score (1 - available_percentage)
+        # Higher percentage used = higher score = worse
+        space_score = 1 - (space_available / total_space)
+        
+        # Combine scores with weights
+        return (self.DISTANCE_WEIGHT * normalized_distance + 
+                self.SPACE_WEIGHT * space_score)
 
     def update_priorities(self, client_id: str, client_location: Tuple[float, float], 
-                        servers: Dict[str, Tuple[float, float, int]]):
-        """Update priority list for a client based on distances to servers."""
+                        servers: Dict[str, Tuple[float, float, int, int]]):  # (x, y, available_space, total_space)
+        """Update priority list for a client based on distance and available space."""
         with self.lock:
-            distances = []
-            for server_id, (x, y, space) in servers.items():
+            server_scores = []
+            for server_id, (x, y, available_space, total_space) in servers.items():
+                # Calculate distance
                 dx = client_location[0] - x
                 dy = client_location[1] - y
                 distance = math.sqrt(dx*dx + dy*dy)
-                distances.append(ServerDistance(server_id, distance, space))
+                
+                # Calculate combined score
+                score = self._calculate_server_score(distance, available_space, total_space)
+                
+                server_scores.append(ServerDistance(
+                    server_id=server_id,
+                    distance=distance,
+                    space_available=available_space
+                ))
+                
+                # Store the score for sorting
+                server_scores[-1].score = score
             
-            # Sort by distance
-            self.client_priorities[client_id] = sorted(distances, key=lambda x: x.distance)
+            # Sort by combined score (lower is better)
+            self.client_priorities[client_id] = sorted(server_scores, key=lambda x: x.score)
 
     def get_priority_servers(self, client_id: str, exclude_servers: Set[str] = None) -> List[str]:
         """Get ordered list of servers by priority for a client."""
@@ -278,9 +312,11 @@ class MasterServer:
             server_info = {}
             for addr, _ in self.chunk_servers.items():
                 node = self.location_graph.nodes.get(addr)
-                if node:
-                    space = self.location_graph.space_info.get(addr, {}).get('available', 0)
-                    server_info[addr] = (*node, space)
+                space_data = self.location_graph.space_info.get(addr, {})
+                if node and space_data:
+                    available_space = space_data.get('available', 0)
+                    total_space = space_data.get('total', 0)
+                    server_info[addr] = (*node, available_space, total_space)
             
             for client_id in self.clients:
                 if client_id in self.location_graph.nodes:
