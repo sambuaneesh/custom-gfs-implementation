@@ -308,31 +308,11 @@ python run_chunk_server.py --id chunk1 --config custom_config.toml
 ## Limitations and Missing Features Compared to Real GFS
 
 ### Architecture Differences
-- **Single-Phase Commit**: Current implementation uses single-phase commit protocol instead of the two-phase commit used in real GFS
+- **Partial Dual Phase Commit**: Only prepare and commit phases with no lease
 - **Single Master**: No master replication or failover (Real GFS has shadow masters)
 - **Simplified Chunk Management**: Basic chunk allocation without load balancing
-- **Limited Metadata Operations**: No namespace management or snapshot support
+- **Limited Metadata Operations**: No snapshot support
 - **No Lease Management**: Real GFS uses chunk leases for consistency
-
-### Commit Protocol Differences
-1. **Current Implementation (Single-Phase)**
-   - Primary chunk server receives data
-   - Primary directly writes and forwards to replicas
-   - No explicit preparation phase
-   - No verification of replica readiness
-   - Faster but less reliable
-
-2. **Real GFS (Two-Phase)**
-   - Phase 1 (Preparation):
-     - Primary sends data to all replicas
-     - Replicas acknowledge receipt
-     - Replicas prepare but don't commit
-   - Phase 2 (Commit):
-     - Primary verifies all replicas are ready
-     - Primary sends commit command
-     - Replicas commit changes
-     - Replicas acknowledge commit
-   - More reliable but slower
 
 ### Missing Features
 1. **Consistency Model**
@@ -341,38 +321,23 @@ python run_chunk_server.py --id chunk1 --config custom_config.toml
    - No atomic record append operations across chunks
    - No snapshot functionality
 
-2. **Performance Optimizations**
-   - No flow control
-   - No intelligent chunk placement
-   - No data flow optimization
-   - No checksum for data integrity
 
 3. **Security**
    - No authentication/authorization
    - No encryption (in-transit or at-rest)
-   - No access control lists
 
-4. **Recovery Mechanisms**
-   - Limited chunk re-replication
-   - No master state recovery
-   - No automatic chunk server recovery
 
 5. **Advanced Operations**
-   - No atomic operations
-   - No record append functionality
    - No snapshot support
    - No garbage collection
 
 6. **Monitoring and Maintenance**
    - No monitoring interface
    - No diagnostic tools
-   - Limited system statistics
 
 ## Future Enhancements
 1. **High Availability**
    - Implement shadow masters
-   - Add master state replication
-   - Implement chunk server failover
 
 2. **Data Consistency**
    - Add lease management
@@ -384,18 +349,12 @@ python run_chunk_server.py --id chunk1 --config custom_config.toml
    - Implement encryption
    - Add access control
 
-4. **Performance**
-   - Implement intelligent chunk placement
-   - Add flow control
-   - Optimize data flow
 
 5. **Monitoring**
    - Add monitoring interface
    - Implement diagnostic tools
-   - Add system statistics
 
 6. **Consistency Improvements**
-   - Implement two-phase commit protocol
    - Add proper lease management
    - Implement atomic operations
    - Add snapshot support
@@ -416,18 +375,6 @@ python run_chunk_server.py --id chunk1 --config custom_config.toml
    - Update master metadata on successful commit
    - Clean up temporary files on rollback
 
-### Transaction Logging
-1. **Console Output**
-   - Color-coded transaction phases
-   - Real-time status updates
-   - Success/failure indicators
-   - Detailed error messages
-
-2. **File Logging**
-   - Transaction logs in `logs/transactions/`
-   - Component logs in `logs/`
-   - Detailed timing information
-   - Complete transaction history
 
 ### Chunk Management
 1. **Primary Operations**

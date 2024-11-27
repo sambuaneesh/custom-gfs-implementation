@@ -112,7 +112,8 @@ class LocationGraph:
             }
 
 class ClientServerPriority:
-    def __init__(self):
+    def __init__(self, config_path: str):
+        self.config = toml.load(config_path)
         self.client_priorities: Dict[str, List[ServerDistance]] = {}
         self.lock = threading.Lock()
         # Weights for the heuristic
@@ -223,7 +224,7 @@ class MasterServer:
         self.client_heartbeat_thread.daemon = True
         self.client_heartbeat_thread.start()
         
-        self.client_priorities = ClientServerPriority()
+        self.client_priorities = ClientServerPriority(config_path)
 
     def _check_heartbeats(self):
         """Check for chunk server heartbeats and remove dead servers."""

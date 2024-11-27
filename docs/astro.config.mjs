@@ -7,7 +7,7 @@ export default defineConfig({
 			title: 'GFS - Replicas by Geography',
 			description: 'Documentation for Geography-aware GFS Implementation',
 			social: {
-				github: 'https://github.com/yourusername/gfs-replicas-by-geography',
+				github: 'https://github.com/sambuaneesh/custom-gfs-implementation',
 			},
 			sidebar: [
 				{
