@@ -3,6 +3,8 @@ host = "localhost"
 port = 5000
 chunk_size = 64000000  # 64MB chunks
 replication_factor = 3
+distance_weight = 0.6  # 60% weight for distance
+space_weight = 0.4  # 40% weight for available space
 
 [chunk_server]
 base_port = 5001  # Chunk servers will start from this port

@@ -462,105 +462,71 @@ make master
 
 2. **Start Chunk Servers**:
 ```bash
-# Format: make chunk <server_id> <x_coord> <y_coord> [space_limit_mb]
-
-# Start chunk server at (10,20) with default space
-make chunk chunk1 10 20
-
-# Start chunk server at (30,40) with 2GB space limit
-make chunk chunk2 30 40 2048
-
-# Start chunk server at (50,60) with 1GB space
-make chunk chunk3 50 60 1024
-
-# Start chunk server at default location (0,0)
-make chunk chunk4
+# Format: make chunk <server_id> <x> <y> [space_mb]
+make chunk chunk1 10 20 1024  # 1GB space at (10,20)
+make chunk chunk2 30 40 2048  # 2GB space at (30,40)
 ```
 
-3. **Start Clients**:
+3. **Start Client with Location**:
 ```bash
-# Format: make client <client_id> <x_coord> <y_coord>
-
-# Start client at (15,25)
-make client client1 15 25
-
-# Start client at (35,45)
-make client client2 35 45
-
-# Start client at default location (0,0)
-make client client3
+# Format: make client <client_id> <x> <y>
+make client client1 15 25  # Client at (15,25)
 ```
 
-### Network Visualization
+### Web Interface Features
 
-The system includes a real-time network visualization interface:
+1. **File Explorer**
+   - Directory navigation
+   - File operations:
+     - Upload
+     - Download
+     - Preview
+     - Create directories
+   - Path-based navigation
 
-1. Access through the "Network Graph" tab in the web interface
-2. Shows:
-   - Chunk servers (red squares)
-   - Active clients (blue circles)
-   - Server-to-server distances
-   - Node locations
-   - Space availability
+2. **Network Graph**
+   - Toggle space usage display
+   - Server priority visualization
+   - Real-time statistics
+   - Auto-refresh option
 
-### Space Management
+3. **Space Management**
+   - Visual space indicators
+   - Priority-based allocation
+   - Dynamic replication
 
-Each chunk server can be configured with a specific space limit:
-- Default: 1024MB (1GB)
-- Configurable through command line
-- Real-time space monitoring
-- Automatic space-aware chunk distribution
+### Priority System
 
-### Location-Based Features
+The system now uses a sophisticated priority algorithm that considers:
+1. **Distance Factor (60%)**
+   - Euclidean distance to client
+   - Normalized by maximum possible distance
 
-1. **Proximity-Based Selection**:
-   - Clients automatically connect to nearest chunk servers
-   - Distance calculated using Euclidean distance
-   - Real-time server selection based on location
+2. **Space Factor (40%)**
+   - Available space percentage
+   - Total capacity consideration
+   - Dynamic updates
 
-2. **Network Topology**:
-   - Visual representation of system topology
-   - Distance-weighted connections
-   - Real-time node position updates
+### Configuration
 
-3. **Monitoring**:
-   - Active chunk servers count
-   - Connected clients count
-   - Node locations and distances
-   - Space utilization
+```toml
+[master]
+replication_factor = 3
+distance_weight = 0.6
+space_weight = 0.4
 
-### Command Line Arguments
+[chunk_server]
+space_limit_mb = 1024  # Default space limit
+heartbeat_interval = 5
 
-1. **Chunk Server**:
-   - `--server_id`: Unique identifier
-   - `--x`: X coordinate
-   - `--y`: Y coordinate
-   - `--space`: Space limit in MB
-
-2. **Client**:
-   - `--client_id`: Unique identifier
-   - `--x`: X coordinate
-   - `--y`: Y coordinate
-
-### Example Deployment Scenario
-
-```bash
-# Start master
-make master
-
-# Start chunk servers in different locations with varying space
-make chunk cs1 0 0 1024    # Origin with 1GB
-make chunk cs2 100 0 2048  # East with 2GB
-make chunk cs3 0 100 1024  # North with 1GB
-make chunk cs4 100 100 512 # Northeast with 512MB
-
-# Start clients in different locations
-make client client1 50 50  # Center
-make client client2 75 25  # Northeast quadrant
+[client]
+upload_chunk_size = 64000000
 ```
 
-This setup creates a distributed system with:
-- 4 chunk servers at different locations with varying capacities
-- 2 clients positioned strategically
-- Automatic nearest-server selection
-- Space-aware chunk distribution
+### Monitoring
+
+- Real-time space usage
+- Server priorities per client
+- Network topology
+- System statistics
+- Client-server relationships

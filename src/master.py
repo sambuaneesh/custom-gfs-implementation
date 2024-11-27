@@ -116,8 +116,8 @@ class ClientServerPriority:
         self.client_priorities: Dict[str, List[ServerDistance]] = {}
         self.lock = threading.Lock()
         # Weights for the heuristic
-        self.DISTANCE_WEIGHT = 0.6  # 60% weight for distance
-        self.SPACE_WEIGHT = 0.4    # 40% weight for available space
+        self.DISTANCE_WEIGHT = float(self.config['master']['distance_weight'])  # Weight for distance
+        self.SPACE_WEIGHT = float(self.config['master']['space_weight'])       # Weight for available space
 
     def _calculate_server_score(self, distance: float, space_available: int, total_space: int) -> float:
         """Calculate server score based on distance and available space.
