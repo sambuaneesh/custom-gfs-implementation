@@ -16,7 +16,7 @@ from src.utils import send_message, receive_message
 
 logger = GFSLogger.get_logger('streamlit_app')
 
-def create_network_graph(graph_data: Dict[str, Any]) -> go.Figure:
+def create_network_graph(graph_data: Dict[str, Any], show_space_usage: bool = False) -> go.Figure:
     """Create a network graph visualization using plotly."""
     # Create networkx graph
     G = nx.Graph()
@@ -35,10 +35,31 @@ def create_network_graph(graph_data: Dict[str, Any]) -> go.Figure:
     ]
     for node in chunk_server_nodes:
         G.add_node(node['id'], pos=node['location'])
-        node_colors.append('#FF4B4B')  # Bright red
+        
+        if show_space_usage and node['space_info']:
+            # Calculate space utilization and color when space usage is enabled
+            used_percent = (node['space_info']['used'] / node['space_info']['total']) * 100
+            # Color gradient from green (0%) to yellow (50%) to red (100%)
+            if used_percent <= 50:
+                color = f'rgb(0, {255 - (used_percent * 2)}, 0)'  # Green to Yellow
+            else:
+                color = f'rgb({min(255, (used_percent - 50) * 5.1)}, {max(0, 255 - (used_percent - 50) * 5.1)}, 0)'  # Yellow to Red
+            
+            # Format space information
+            space_info = f"""<b>Server: {node['id']}</b><br>
+                           Location: {node['location']}<br>
+                           Space Used: {used_percent:.1f}%<br>
+                           Available: {node['space_info']['available'] / (1024*1024):.1f} MB<br>
+                           Total: {node['space_info']['total'] / (1024*1024):.1f} MB"""
+        else:
+            # Default visualization without space usage
+            color = '#FF4B4B'  # Default red
+            space_info = f"<b>Server: {node['id']}</b><br>Location: {node['location']}"
+
+        node_colors.append(color)
         node_symbols.append('square')
         node_sizes.append(30)
-        node_texts.append(f"<b>Address: {node['id']}</b><br>Location: {node['location']}")
+        node_texts.append(space_info)
         node_labels.append('')
 
     # Then add active clients (don't add edges for clients)
@@ -114,14 +135,8 @@ def create_network_graph(graph_data: Dict[str, Any]) -> go.Figure:
     # Create figure
     fig = go.Figure(data=[*edge_traces, node_trace])
     
-    # Update layout with a more professional look
+    # Update layout
     fig.update_layout(
-        # title=dict(
-        #     text='GFS Network Graph',
-        #     font=dict(size=24, color='#2E2E2E', family='Arial Bold'),
-        #     x=0.5,
-        #     y=0.95
-        # ),
         showlegend=False,
         hovermode='closest',
         margin=dict(b=20, l=5, r=5, t=40),
@@ -137,24 +152,37 @@ def create_network_graph(graph_data: Dict[str, Any]) -> go.Figure:
             showticklabels=False,
             showline=False
         ),
-        plot_bgcolor='#FFFFFF',  # White background
-        paper_bgcolor='#FFFFFF',
-        annotations=[
-            dict(
-                text="",
-                showarrow=False,
-                x=0.5,
-                y=1.05,
-                xref="paper",
-                yref="paper",
-                font=dict(size=14, color='#2E2E2E')
-            )
-        ]
+        plot_bgcolor='#FFFFFF',
+        paper_bgcolor='#FFFFFF'
     )
     
     # Add a subtle grid in the background
     fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.1)')
     fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.1)')
+    
+    # Add color scale legend only when space usage is enabled
+    # if show_space_usage:
+    #     fig.add_trace(go.Scatter(
+    #         x=[None],
+    #         y=[None],
+    #         mode='markers',
+    #         marker=dict(
+    #             colorscale=[
+    #                 [0, 'green'],
+    #                 [0.5, 'yellow'],
+    #                 [1, 'red']
+    #             ],
+    #             showscale=True,
+    #             colorbar=dict(
+    #                 title='Space Usage',
+    #                 ticksuffix='%',
+    #                 tickmode='array',
+    #                 ticktext=['0%', '50%', '100%'],
+    #                 tickvals=[0, 50, 100],
+    #             ),
+    #         ),
+    #         showlegend=False,
+    #     ))
     
     return fig
 
@@ -190,6 +218,9 @@ def main():
     if operation == "Network Graph":
         st.header("GFS Network Graph")
         
+        # Add toggle for space usage visualization
+        show_space_usage = st.checkbox("Show Space Usage", value=False)
+        
         try:
             # Get graph data from master
             with client._connect_to_master() as master_sock:
@@ -199,16 +230,16 @@ def main():
                 if response['status'] == 'ok':
                     graph_data = response['graph_data']
                     
-                    # Create and display graph
-                    fig = create_network_graph(graph_data)
+                    # Create and display graph with space usage toggle
+                    fig = create_network_graph(graph_data, show_space_usage)
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # Display statistics in a more appealing way
+                    # Display statistics
                     st.markdown("### Network Statistics")
                     chunk_servers = sum(1 for node in graph_data['nodes'] if node['type'] == 'chunk_server')
                     clients = sum(1 for node in graph_data['nodes'] if node['type'] == 'client')
                     
-                    col1, col2, col3 = st.columns([1,1,1])
+                    col1, col2 = st.columns(2)
                     with col1:
                         st.metric(
                             "Active Chunk Servers",
@@ -223,14 +254,6 @@ def main():
                             delta=None,
                             delta_color="normal"
                         )
-                    # with col3:
-                    #     total_connections = len(graph_data['edges'])
-                    #     st.metric(
-                    #         "Total Connections",
-                    #         total_connections,
-                    #         delta=None,
-                    #         delta_color="normal"
-                    #     )
                     
                     # Auto-refresh
                     if auto_refresh:

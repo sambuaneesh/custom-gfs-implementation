@@ -441,3 +441,126 @@ python run_chunk_server.py --id chunk1 --config custom_config.toml
    - Maintains temporary storage
    - Handles rollbacks
    - Reports status to primary
+
+## Location-Aware System Architecture
+
+The system now implements a location-aware architecture where chunk servers and clients are positioned in a 2D coordinate space:
+
+### Features
+- Cartesian coordinate system for nodes
+- Distance-based chunk server selection
+- Real-time network visualization
+- Automatic nearest-server selection
+- Space-aware chunk distribution
+
+### Running the System
+
+1. **Start the Master Server**:
+```bash
+make master
+```
+
+2. **Start Chunk Servers**:
+```bash
+# Format: make chunk <server_id> <x_coord> <y_coord> [space_limit_mb]
+
+# Start chunk server at (10,20) with default space
+make chunk chunk1 10 20
+
+# Start chunk server at (30,40) with 2GB space limit
+make chunk chunk2 30 40 2048
+
+# Start chunk server at (50,60) with 1GB space
+make chunk chunk3 50 60 1024
+
+# Start chunk server at default location (0,0)
+make chunk chunk4
+```
+
+3. **Start Clients**:
+```bash
+# Format: make client <client_id> <x_coord> <y_coord>
+
+# Start client at (15,25)
+make client client1 15 25
+
+# Start client at (35,45)
+make client client2 35 45
+
+# Start client at default location (0,0)
+make client client3
+```
+
+### Network Visualization
+
+The system includes a real-time network visualization interface:
+
+1. Access through the "Network Graph" tab in the web interface
+2. Shows:
+   - Chunk servers (red squares)
+   - Active clients (blue circles)
+   - Server-to-server distances
+   - Node locations
+   - Space availability
+
+### Space Management
+
+Each chunk server can be configured with a specific space limit:
+- Default: 1024MB (1GB)
+- Configurable through command line
+- Real-time space monitoring
+- Automatic space-aware chunk distribution
+
+### Location-Based Features
+
+1. **Proximity-Based Selection**:
+   - Clients automatically connect to nearest chunk servers
+   - Distance calculated using Euclidean distance
+   - Real-time server selection based on location
+
+2. **Network Topology**:
+   - Visual representation of system topology
+   - Distance-weighted connections
+   - Real-time node position updates
+
+3. **Monitoring**:
+   - Active chunk servers count
+   - Connected clients count
+   - Node locations and distances
+   - Space utilization
+
+### Command Line Arguments
+
+1. **Chunk Server**:
+   - `--server_id`: Unique identifier
+   - `--x`: X coordinate
+   - `--y`: Y coordinate
+   - `--space`: Space limit in MB
+
+2. **Client**:
+   - `--client_id`: Unique identifier
+   - `--x`: X coordinate
+   - `--y`: Y coordinate
+
+### Example Deployment Scenario
+
+```bash
+# Start master
+make master
+
+# Start chunk servers in different locations with varying space
+make chunk cs1 0 0 1024    # Origin with 1GB
+make chunk cs2 100 0 2048  # East with 2GB
+make chunk cs3 0 100 1024  # North with 1GB
+make chunk cs4 100 100 512 # Northeast with 512MB
+
+# Start clients in different locations
+make client client1 50 50  # Center
+make client client2 75 25  # Northeast quadrant
+```
+
+This setup creates a distributed system with:
+- 4 chunk servers at different locations with varying capacities
+- 2 clients positioned strategically
+- Automatic nearest-server selection
+- Space-aware chunk distribution

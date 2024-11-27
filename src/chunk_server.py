@@ -127,12 +127,23 @@ class ChunkServer:
         self.logger.info("Starting heartbeat loop")
         while True:
             try:
+                # Calculate space usage
+                used_space = 0
+                for dirpath, dirnames, filenames in os.walk(self.data_dir):
+                    for f in filenames:
+                        fp = os.path.join(dirpath, f)
+                        used_space += os.path.getsize(fp)
+
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.connect((self.master_host, self.master_port))
                     send_message(s, {
                         'command': 'heartbeat',
                         'address': self.address,
-                        'location': self.location  # Include location in heartbeat
+                        'location': self.location,
+                        'space_info': {
+                            'total': self.space_limit,
+                            'used': used_space
+                        }
                     })
                     self.logger.debug(f"Sent heartbeat to master")
             except Exception as e:

@@ -17,6 +17,7 @@ class LocationGraph:
         self.nodes = {}  # id -> (x, y) coordinates
         self.distances = defaultdict(dict)  # id -> {other_id -> distance}
         self.node_type = {}  # id -> "client" or "chunk_server"
+        self.space_info = {}  # node_id -> {total: int, used: int, available: int}
         self.lock = threading.Lock()
 
     def add_node(self, node_id: str, location: tuple, node_type: str):
@@ -71,7 +72,8 @@ class LocationGraph:
                     {
                         'id': node_id,
                         'type': self.node_type[node_id],
-                        'location': self.nodes[node_id]
+                        'location': self.nodes[node_id],
+                        'space_info': self.space_info.get(node_id, {}) if self.node_type[node_id] == "chunk_server" else None
                     }
                     for node_id in self.nodes
                 ],
@@ -89,6 +91,15 @@ class LocationGraph:
                     node_id for node_id in self.nodes
                     if self.node_type[node_id] == "client"
                 ]
+            }
+
+    def update_space_info(self, node_id: str, total: int, used: int):
+        """Update space information for a node."""
+        with self.lock:
+            self.space_info[node_id] = {
+                'total': total,
+                'used': used,
+                'available': total - used
             }
 
 class MasterServer:
@@ -170,7 +181,7 @@ class MasterServer:
                 self.logger.debug(f"Received command '{command}' from {address}")
 
                 if command == 'heartbeat':
-                    self._handle_heartbeat(message['address'])
+                    self._handle_heartbeat(message)
                 elif command == 'register_chunk_server':
                     self._handle_register_chunk_server(message)
                 elif command == 'get_chunk_locations':
@@ -206,12 +217,17 @@ class MasterServer:
             client_socket.close()
             self.logger.debug(f"Closed connection with {address}")
 
-    def _handle_heartbeat(self, address: str):
+    def _handle_heartbeat(self, message: Dict):
         """Handle heartbeat from chunk server."""
+        address = message['address']
         with self.chunk_server_lock:
             self.chunk_servers[address] = time.time()
-            self.location_graph.add_node(address, self.location_graph.nodes[address], "chunk_server")
-            self.logger.debug(f"Received heartbeat from chunk server {address}")
+            self.location_graph.add_node(address, message['location'], "chunk_server")
+            if 'space_info' in message:
+                self.location_graph.update_space_info(address, 
+                    message['space_info']['total'],
+                    message['space_info']['used']
+                )
 
     def _handle_register_chunk_server(self, message: Dict):
         """Handle chunk server registration with location."""
